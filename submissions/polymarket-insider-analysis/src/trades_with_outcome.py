@@ -2,6 +2,7 @@ import csv
 from datetime import datetime
 from pathlib import Path
 
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 RAW_DIR = BASE_DIR / "data" / "raw"
@@ -9,329 +10,432 @@ PROCESSED_DIR = BASE_DIR / "data" / "processed"
 
 PROCESSED_DIR.mkdir(
     parents=True,
-    exist_ok=True
+    exist_ok=True,
+)
+
+MARKET_OUTCOMES_FILE = (
+    PROCESSED_DIR
+    / "market_outcomes.csv"
+)
+
+TRADES_FILE = (
+    RAW_DIR
+    / "trades.csv"
+)
+
+OUTPUT_FILE = (
+    PROCESSED_DIR
+    / "trades_with_outcome.csv"
 )
 
 
-# --------------------------------------------------
-# 1. Загружаем результаты рынков
-# --------------------------------------------------
+def load_market_results():
+    """
+    Load resolved market metadata.
+    """
 
-market_results = {}
-
-with open(
-    PROCESSED_DIR / "market_outcomes.csv",
-    "r",
-    encoding="utf-8"
-) as file:
-
-    reader = csv.DictReader(file)
-
-    for row in reader:
-
-        condition_id = row["condition_id"]
-
-        market_results[condition_id] = {
-            "winning_outcome": row["winning_outcome"],
-            "closed_time": row["closed_time"],
-            "uma_status": row["uma_status"]
-        }
-
-
-print(
-    "Загружено рынков:",
-    len(market_results)
-)
-
-
-# --------------------------------------------------
-# 2. Открываем trades.csv
-# --------------------------------------------------
-
-with open(
-    RAW_DIR / "trades.csv",
-    "r",
-    encoding="utf-8"
-) as input_file:
-
-    reader = csv.DictReader(input_file)
-
-    fieldnames = reader.fieldnames + [
-        "winning_outcome",
-        "uma_status",
-        "is_winning_buy",
-        "closed_time",
-        "hours_before_close"
-    ]
-
-
-    # --------------------------------------------------
-    # 3. Создаём новый CSV
-    # --------------------------------------------------
+    market_results = {}
 
     with open(
-        PROCESSED_DIR / "trades_with_outcome.csv",
-        "w",
-        newline="",
-        encoding="utf-8"
-    ) as output_file:
+        MARKET_OUTCOMES_FILE,
+        "r",
+        encoding="utf-8",
+    ) as file:
 
-        writer = csv.DictWriter(
-            output_file,
-            fieldnames=fieldnames
+        reader = csv.DictReader(
+            file
         )
 
-        writer.writeheader()
+        for row in reader:
 
+            condition_id = row.get(
+                "condition_id",
+                "",
+            ).strip()
 
-        total_trades = 0
-        matched_trades = 0
-        resolved_trades = 0
-
-        buy_trades = 0
-        winning_buy_trades = 0
-
-        timing_available = 0
-
-
-        # --------------------------------------------------
-        # 4. Обрабатываем сделки
-        # --------------------------------------------------
-
-        for trade in reader:
-
-            total_trades += 1
-
-            condition_id = trade["condition_id"]
-
-
-            # --------------------------------------------------
-            # Рынок не найден
-            # --------------------------------------------------
-
-            if condition_id not in market_results:
-
-                trade["winning_outcome"] = ""
-                trade["uma_status"] = ""
-                trade["is_winning_buy"] = ""
-                trade["closed_time"] = ""
-                trade["hours_before_close"] = ""
-
-                writer.writerow(trade)
-
+            if not condition_id:
                 continue
 
-
-            matched_trades += 1
-
-            market = market_results[
+            market_results[
                 condition_id
-            ]
+            ] = {
+                "winning_outcome": row.get(
+                    "winning_outcome",
+                    "",
+                ),
+                "closed_time": row.get(
+                    "closed_time",
+                    "",
+                ),
+                "uma_status": row.get(
+                    "uma_status",
+                    "",
+                ),
+            }
+
+    if not market_results:
+        raise RuntimeError(
+            "market_outcomes.csv contains no markets."
+        )
+
+    print(
+        "Loaded market outcomes:",
+        len(market_results),
+    )
+
+    return market_results
 
 
-            winning_outcome = market[
-                "winning_outcome"
-            ]
+def parse_datetime(value):
+    """
+    Parse an ISO timestamp.
+    """
 
-            closed_time = market[
-                "closed_time"
-            ]
+    if not value:
+        return None
 
-            uma_status = market[
-                "uma_status"
-            ]
+    try:
+        return datetime.fromisoformat(
+            value.replace(
+                "Z",
+                "+00:00",
+            )
+        )
+
+    except (
+        ValueError,
+        AttributeError,
+    ):
+        return None
 
 
-            trade["winning_outcome"] = (
-                winning_outcome
+def main():
+    market_results = (
+        load_market_results()
+    )
+
+    total_trades = 0
+    matched_trades = 0
+    resolved_trades = 0
+
+    buy_trades = 0
+    winning_buy_trades = 0
+
+    timing_available = 0
+    negative_timing = 0
+
+    unmatched_condition_ids = set()
+    trade_market_ids = set()
+
+    with open(
+        TRADES_FILE,
+        "r",
+        encoding="utf-8",
+    ) as input_file:
+
+        reader = csv.DictReader(
+            input_file
+        )
+
+        if reader.fieldnames is None:
+            raise RuntimeError(
+                "trades.csv has no header."
             )
 
-            trade["uma_status"] = (
-                uma_status
+        fieldnames = list(
+            reader.fieldnames
+        ) + [
+            "winning_outcome",
+            "uma_status",
+            "is_winning_buy",
+            "closed_time",
+            "hours_before_close",
+        ]
+
+        with open(
+            OUTPUT_FILE,
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as output_file:
+
+            writer = csv.DictWriter(
+                output_file,
+                fieldnames=fieldnames,
             )
 
-            trade["closed_time"] = (
-                closed_time
-            )
+            writer.writeheader()
 
+            for trade in reader:
 
-            # --------------------------------------------------
-            # 5. BUY на победивший outcome
-            # --------------------------------------------------
+                total_trades += 1
 
-            is_winning_buy = ""
+                condition_id = trade.get(
+                    "condition_id",
+                    "",
+                ).strip()
 
-
-            if winning_outcome:
-
-                resolved_trades += 1
-
-
-                if trade["side"] == "BUY":
-
-                    buy_trades += 1
-
-
-                    if (
-                        trade["outcome"]
-                        == winning_outcome
-                    ):
-
-                        is_winning_buy = 1
-
-                        winning_buy_trades += 1
-
-                    else:
-
-                        is_winning_buy = 0
-
-
-            trade["is_winning_buy"] = (
-                is_winning_buy
-            )
-
-
-            # --------------------------------------------------
-            # 6. Время сделки до закрытия рынка
-            # --------------------------------------------------
-
-            hours_before_close = ""
-
-
-            if closed_time:
-
-                try:
-
-                    trade_time = datetime.fromisoformat(
-                        trade["trade_date"]
+                if condition_id:
+                    trade_market_ids.add(
+                        condition_id
                     )
 
-                    close_time = datetime.fromisoformat(
-                        closed_time
+                market = (
+                    market_results.get(
+                        condition_id
                     )
-
-                    time_difference = (
-                        close_time
-                        - trade_time
-                    )
-
-                    hours_before_close = (
-                        time_difference.total_seconds()
-                        / 3600
-                    )
-
-                    hours_before_close = round(
-                        hours_before_close,
-                        4
-                    )
-
-                    timing_available += 1
-
-
-                except ValueError:
-
-                    hours_before_close = ""
-
-
-            trade[
-                "hours_before_close"
-            ] = hours_before_close
-
-
-            # --------------------------------------------------
-            # 7. Записываем
-            # --------------------------------------------------
-
-            writer.writerow(trade)
-
-
-            # --------------------------------------------------
-            # 8. Прогресс
-            # --------------------------------------------------
-
-            if total_trades % 100000 == 0:
-
-                print(
-                    "Обработано:",
-                    total_trades
                 )
 
+                if market is None:
 
-# --------------------------------------------------
-# 9. Итог
-# --------------------------------------------------
+                    unmatched_condition_ids.add(
+                        condition_id
+                    )
 
-print()
+                    # Do not write incomplete
+                    # enrichment silently.
+                    continue
 
-print(
-    "======================================"
-)
+                matched_trades += 1
 
-print(
-    "ГОТОВО"
-)
+                winning_outcome = market[
+                    "winning_outcome"
+                ]
 
-print(
-    "======================================"
-)
+                closed_time = market[
+                    "closed_time"
+                ]
 
-print()
+                uma_status = market[
+                    "uma_status"
+                ]
 
-print(
-    "Всего сделок:",
-    total_trades
-)
+                trade[
+                    "winning_outcome"
+                ] = winning_outcome
 
-print(
-    "Сопоставлено с рынками:",
-    matched_trades
-)
+                trade[
+                    "uma_status"
+                ] = uma_status
 
-print(
-    "Сделок на resolved рынках:",
-    resolved_trades
-)
+                trade[
+                    "closed_time"
+                ] = closed_time
 
-print(
-    "BUY-сделок:",
-    buy_trades
-)
+                # ------------------------------------------
+                # BUY on the eventual winning outcome
+                # ------------------------------------------
 
-print(
-    "BUY на победивший outcome:",
-    winning_buy_trades
-)
+                is_winning_buy = ""
 
-print(
-    "Есть timing:",
-    timing_available
-)
+                if winning_outcome:
 
+                    resolved_trades += 1
 
-# --------------------------------------------------
-# 10. Общая BUY accuracy
-# --------------------------------------------------
+                    side = trade.get(
+                        "side",
+                        "",
+                    ).upper()
 
-if buy_trades > 0:
+                    if side == "BUY":
 
-    accuracy = (
-        winning_buy_trades
-        / buy_trades
-        * 100
+                        buy_trades += 1
+
+                        trade_outcome = (
+                            trade.get(
+                                "outcome",
+                                "",
+                            )
+                        )
+
+                        if (
+                            trade_outcome
+                            == winning_outcome
+                        ):
+                            is_winning_buy = 1
+
+                            winning_buy_trades += 1
+
+                        else:
+                            is_winning_buy = 0
+
+                trade[
+                    "is_winning_buy"
+                ] = is_winning_buy
+
+                # ------------------------------------------
+                # Time between trade and market close
+                # ------------------------------------------
+
+                hours_before_close = ""
+
+                if closed_time:
+
+                    trade_time = (
+                        parse_datetime(
+                            trade.get(
+                                "trade_date",
+                                "",
+                            )
+                        )
+                    )
+
+                    close_time = (
+                        parse_datetime(
+                            closed_time
+                        )
+                    )
+
+                    if (
+                        trade_time is not None
+                        and close_time is not None
+                    ):
+
+                        time_difference = (
+                            close_time
+                            - trade_time
+                        )
+
+                        hours_before_close = (
+                            time_difference
+                            .total_seconds()
+                            / 3600
+                        )
+
+                        hours_before_close = round(
+                            hours_before_close,
+                            4,
+                        )
+
+                        timing_available += 1
+
+                        if (
+                            hours_before_close
+                            < 0
+                        ):
+                            negative_timing += 1
+
+                trade[
+                    "hours_before_close"
+                ] = hours_before_close
+
+                writer.writerow(
+                    trade
+                )
+
+                if (
+                    total_trades
+                    % 100000
+                    == 0
+                ):
+                    print(
+                        "Processed:",
+                        total_trades,
+                    )
+
+    # ----------------------------------------------
+    # Coverage check
+    # ----------------------------------------------
+
+    if unmatched_condition_ids:
+
+        print()
+        print(
+            "Unmatched condition IDs:"
+        )
+
+        for condition_id in sorted(
+            unmatched_condition_ids
+        ):
+            print(
+                condition_id
+            )
+
+        try:
+            OUTPUT_FILE.unlink()
+        except FileNotFoundError:
+            pass
+
+        raise RuntimeError(
+            f"{len(unmatched_condition_ids)} "
+            f"condition ID(s) from trades.csv "
+            f"were not found in "
+            f"market_outcomes.csv. "
+            f"Output file was removed."
+        )
+
+    print()
+    print(
+        "======================================"
+    )
+    print("DONE")
+    print(
+        "======================================"
     )
 
     print(
-        "Общая BUY accuracy:",
-        round(
-            accuracy,
-            2
-        ),
-        "%"
+        "Total trades:",
+        total_trades,
+    )
+
+    print(
+        "Trade markets:",
+        len(trade_market_ids),
+    )
+
+    print(
+        "Matched trades:",
+        matched_trades,
+    )
+
+    print(
+        "Trades on resolved markets:",
+        resolved_trades,
+    )
+
+    print(
+        "BUY trades:",
+        buy_trades,
+    )
+
+    print(
+        "BUY on winning outcome:",
+        winning_buy_trades,
+    )
+
+    print(
+        "Timing available:",
+        timing_available,
+    )
+
+    print(
+        "Trades after closed_time:",
+        negative_timing,
+    )
+
+    if buy_trades > 0:
+
+        hit_rate = (
+            winning_buy_trades
+            / buy_trades
+            * 100
+        )
+
+        print(
+            "BUY outcome hit rate:",
+            round(
+                hit_rate,
+                2,
+            ),
+            "%",
+        )
+
+    print()
+    print(
+        "Created:",
+        OUTPUT_FILE,
     )
 
 
-print()
-
-print(
-    "Создан файл: trades_with_outcome.csv"
-)
+if __name__ == "__main__":
+    main()

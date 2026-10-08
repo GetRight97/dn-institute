@@ -2,6 +2,7 @@ import csv
 from collections import defaultdict
 from pathlib import Path
 
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed"
@@ -9,168 +10,256 @@ RESULTS_DIR = BASE_DIR / "results"
 
 RESULTS_DIR.mkdir(
     parents=True,
-    exist_ok=True
+    exist_ok=True,
 )
 
-# --------------------------------------------------
-# 1. Настройки
-# --------------------------------------------------
+INPUT_FILE = (
+    PROCESSED_DIR
+    / "trades_with_outcome.csv"
+)
+
+OUTPUT_FILE = (
+    RESULTS_DIR
+    / "trader_accuracy.csv"
+)
 
 LATE_HOURS = 24
+MIN_BUYS_FOR_DISPLAY = 20
 
 
-# --------------------------------------------------
-# 2. Статистика трейдеров
-# --------------------------------------------------
-
-traders = defaultdict(lambda: {
-    "buy_count": 0,
-    "winning_buy_count": 0,
-
-    "buy_volume": 0,
-    "winning_buy_volume": 0,
-
-    "late_buy_count": 0,
-    "late_winning_buy_count": 0,
-
-    "markets": set(),
-
-    "max_buy_volume": 0
-})
+traders = defaultdict(
+    lambda: {
+        "buy_count": 0,
+        "winning_buy_count": 0,
+        "buy_volume": 0.0,
+        "winning_buy_volume": 0.0,
+        "late_buy_count": 0,
+        "late_winning_buy_count": 0,
+        "markets": set(),
+        "max_buy_volume": 0.0,
+    }
+)
 
 
-# --------------------------------------------------
-# 3. Читаем сделки
-# --------------------------------------------------
+total_buy_count = 0
+total_winning_buy_count = 0
+
 
 with open(
-    PROCESSED_DIR / "trades_with_outcome.csv",
+    INPUT_FILE,
     "r",
-    encoding="utf-8"
+    encoding="utf-8",
 ) as file:
 
-    reader = csv.DictReader(file)
+    reader = csv.DictReader(
+        file
+    )
 
     for trade in reader:
 
-        # Нас интересуют только BUY
-        if trade["side"] != "BUY":
+        side = trade.get(
+            "side",
+            "",
+        ).upper()
+
+        if side != "BUY":
             continue
 
-        # Только рынки, где победитель определён
-        if trade["winning_outcome"] == "":
+        winning_outcome = trade.get(
+            "winning_outcome",
+            "",
+        )
+
+        if not winning_outcome:
             continue
 
-        wallet = trade["proxy_wallet"]
+        wallet = trade.get(
+            "proxy_wallet",
+            "",
+        ).strip()
 
-        size = float(trade["size"])
-        price = float(trade["price"])
+        if not wallet:
+            continue
 
-        volume = size * price
+        try:
+            size = float(
+                trade.get(
+                    "size",
+                    0,
+                )
+            )
+
+            price = float(
+                trade.get(
+                    "price",
+                    0,
+                )
+            )
+
+        except (
+            ValueError,
+            TypeError,
+        ):
+            continue
+
+        volume = (
+            size
+            * price
+        )
 
         is_winning_buy = (
-            trade["is_winning_buy"] == "1"
+            trade.get(
+                "is_winning_buy",
+                "",
+            )
+            == "1"
         )
 
-        hours_before_close = trade[
-            "hours_before_close"
+        hours_before_close = (
+            trade.get(
+                "hours_before_close",
+                "",
+            )
+        )
+
+        stats = traders[
+            wallet
         ]
 
-        # --------------------------------------------------
-        # Общая BUY статистика
-        # --------------------------------------------------
+        stats[
+            "buy_count"
+        ] += 1
 
-        traders[wallet]["buy_count"] += 1
+        stats[
+            "buy_volume"
+        ] += volume
 
-        traders[wallet]["buy_volume"] += volume
-
-        traders[wallet]["markets"].add(
-            trade["condition_id"]
+        stats[
+            "markets"
+        ].add(
+            trade.get(
+                "condition_id",
+                "",
+            )
         )
 
-        if volume > traders[wallet]["max_buy_volume"]:
-            traders[wallet]["max_buy_volume"] = volume
+        if (
+            volume
+            > stats[
+                "max_buy_volume"
+            ]
+        ):
+            stats[
+                "max_buy_volume"
+            ] = volume
 
-        # --------------------------------------------------
-        # Выигрышная BUY
-        # --------------------------------------------------
+        total_buy_count += 1
 
         if is_winning_buy:
 
-            traders[wallet][
+            stats[
                 "winning_buy_count"
             ] += 1
 
-            traders[wallet][
+            stats[
                 "winning_buy_volume"
             ] += volume
 
-        # --------------------------------------------------
-        # Поздняя BUY
-        # --------------------------------------------------
+            total_winning_buy_count += 1
 
-        if hours_before_close != "":
+        if hours_before_close not in (
+            "",
+            None,
+        ):
+            try:
+                hours = float(
+                    hours_before_close
+                )
 
-            hours = float(hours_before_close)
+            except (
+                ValueError,
+                TypeError,
+            ):
+                hours = None
 
-            if 0 <= hours <= LATE_HOURS:
+            if (
+                hours is not None
+                and 0
+                <= hours
+                <= LATE_HOURS
+            ):
 
-                traders[wallet][
+                stats[
                     "late_buy_count"
                 ] += 1
 
                 if is_winning_buy:
 
-                    traders[wallet][
+                    stats[
                         "late_winning_buy_count"
                     ] += 1
 
 
-# --------------------------------------------------
-# 4. Формируем результаты
-# --------------------------------------------------
+baseline_hit_rate = (
+    total_winning_buy_count
+    / total_buy_count
+    if total_buy_count > 0
+    else 0
+)
+
 
 results = []
 
 
 for wallet, stats in traders.items():
 
-    buy_count = stats["buy_count"]
+    buy_count = (
+        stats[
+            "buy_count"
+        ]
+    )
 
-    winning_buy_count = stats[
-        "winning_buy_count"
-    ]
+    winning_buy_count = (
+        stats[
+            "winning_buy_count"
+        ]
+    )
 
-    buy_volume = stats[
-        "buy_volume"
-    ]
+    buy_volume = (
+        stats[
+            "buy_volume"
+        ]
+    )
 
-    winning_buy_volume = stats[
-        "winning_buy_volume"
-    ]
+    winning_buy_volume = (
+        stats[
+            "winning_buy_volume"
+        ]
+    )
 
-    late_buy_count = stats[
-        "late_buy_count"
-    ]
+    late_buy_count = (
+        stats[
+            "late_buy_count"
+        ]
+    )
 
-    late_winning_buy_count = stats[
-        "late_winning_buy_count"
-    ]
+    late_winning_buy_count = (
+        stats[
+            "late_winning_buy_count"
+        ]
+    )
 
-    # --------------------------------------------------
-    # Accuracy
-    # --------------------------------------------------
-
-    accuracy = (
+    hit_rate = (
         winning_buy_count
         / buy_count
         if buy_count > 0
         else 0
     )
 
-    # --------------------------------------------------
-    # Доля выигрышного объёма
-    # --------------------------------------------------
+    edge_vs_baseline = (
+        hit_rate
+        - baseline_hit_rate
+    )
 
     winning_volume_ratio = (
         winning_buy_volume
@@ -179,20 +268,12 @@ for wallet, stats in traders.items():
         else 0
     )
 
-    # --------------------------------------------------
-    # Late accuracy
-    # --------------------------------------------------
-
-    late_accuracy = (
+    late_hit_rate = (
         late_winning_buy_count
         / late_buy_count
         if late_buy_count > 0
         else 0
     )
-
-    # --------------------------------------------------
-    # Средний BUY
-    # --------------------------------------------------
 
     average_buy = (
         buy_volume
@@ -201,178 +282,248 @@ for wallet, stats in traders.items():
         else 0
     )
 
-    results.append({
-        "wallet": wallet,
+    results.append(
+        {
+            "wallet": wallet,
 
-        "buy_count": buy_count,
+            "buy_count":
+                buy_count,
 
-        "winning_buy_count":
-            winning_buy_count,
+            "winning_buy_count":
+                winning_buy_count,
 
-        "accuracy":
-            accuracy,
+            "hit_rate":
+                hit_rate,
 
-        "buy_volume":
-            buy_volume,
+            "baseline_hit_rate":
+                baseline_hit_rate,
 
-        "winning_buy_volume":
-            winning_buy_volume,
+            "edge_vs_baseline":
+                edge_vs_baseline,
 
-        "winning_volume_ratio":
-            winning_volume_ratio,
+            "buy_volume":
+                buy_volume,
 
-        "average_buy":
-            average_buy,
+            "winning_buy_volume":
+                winning_buy_volume,
 
-        "max_buy_volume":
-            stats["max_buy_volume"],
+            "winning_volume_ratio":
+                winning_volume_ratio,
 
-        "markets":
-            len(stats["markets"]),
+            "average_buy":
+                average_buy,
 
-        "late_buy_count":
-            late_buy_count,
+            "max_buy_volume":
+                stats[
+                    "max_buy_volume"
+                ],
 
-        "late_winning_buy_count":
-            late_winning_buy_count,
+            "markets":
+                len(
+                    stats[
+                        "markets"
+                    ]
+                ),
 
-        "late_accuracy":
-            late_accuracy
-    })
+            "late_buy_count":
+                late_buy_count,
 
+            "late_winning_buy_count":
+                late_winning_buy_count,
 
-# --------------------------------------------------
-# 5. Сортируем
-# --------------------------------------------------
+            "late_hit_rate":
+                late_hit_rate,
+        }
+    )
 
-# Чтобы не ловить трейдеров,
-# которые сделали 1 сделку и случайно угадали,
-# покажем сначала тех, у кого хотя бы 20 BUY.
 
 filtered_results = [
     trader
     for trader in results
-    if trader["buy_count"] >= 20
+    if trader[
+        "buy_count"
+    ] >= MIN_BUYS_FOR_DISPLAY
 ]
 
 
 filtered_results.sort(
     key=lambda trader: (
-        trader["accuracy"],
-        trader["buy_count"]
+        trader[
+            "hit_rate"
+        ],
+        trader[
+            "buy_count"
+        ],
     ),
-    reverse=True
+    reverse=True,
 )
 
 
-# --------------------------------------------------
-# 6. TOP-30
-# --------------------------------------------------
+print()
+print(
+    "======================================"
+)
+print(
+    "TOP-30 BY BUY OUTCOME HIT RATE"
+)
+print(
+    f"minimum {MIN_BUYS_FOR_DISPLAY} BUY"
+)
+print(
+    "======================================"
+)
 
 print()
-print("======================================")
-print("TOP-30 ПО BUY ACCURACY")
-print("минимум 20 BUY")
-print("======================================")
+print(
+    "Global BUY baseline:",
+    round(
+        baseline_hit_rate
+        * 100,
+        2,
+    ),
+    "%",
+)
+
+print(
+    "Unique BUY wallets:",
+    len(results),
+)
 
 
-for trader in filtered_results[:30]:
+for trader in filtered_results[
+    :30
+]:
 
     print()
 
     print(
         "Wallet:",
-        trader["wallet"]
+        trader[
+            "wallet"
+        ],
     )
 
     print(
         "BUY:",
-        trader["buy_count"]
+        trader[
+            "buy_count"
+        ],
     )
 
     print(
         "Winning BUY:",
-        trader["winning_buy_count"]
+        trader[
+            "winning_buy_count"
+        ],
     )
 
     print(
-        "Accuracy:",
+        "Hit rate:",
         round(
-            trader["accuracy"] * 100,
-            2
+            trader[
+                "hit_rate"
+            ]
+            * 100,
+            2,
         ),
-        "%"
+        "%",
+    )
+
+    print(
+        "Edge vs baseline:",
+        round(
+            trader[
+                "edge_vs_baseline"
+            ]
+            * 100,
+            2,
+        ),
+        "pp",
     )
 
     print(
         "BUY volume:",
         round(
-            trader["buy_volume"],
-            2
-        )
+            trader[
+                "buy_volume"
+            ],
+            2,
+        ),
     )
 
     print(
         "Winning volume ratio:",
         round(
-            trader["winning_volume_ratio"] * 100,
-            2
+            trader[
+                "winning_volume_ratio"
+            ]
+            * 100,
+            2,
         ),
-        "%"
+        "%",
     )
 
     print(
         "Average BUY:",
         round(
-            trader["average_buy"],
-            2
-        )
+            trader[
+                "average_buy"
+            ],
+            2,
+        ),
     )
 
     print(
         "Max BUY:",
         round(
-            trader["max_buy_volume"],
-            2
-        )
+            trader[
+                "max_buy_volume"
+            ],
+            2,
+        ),
     )
 
     print(
         "Markets:",
-        trader["markets"]
+        trader[
+            "markets"
+        ],
     )
 
     print(
         "Late BUY:",
-        trader["late_buy_count"]
+        trader[
+            "late_buy_count"
+        ],
     )
 
     print(
-        "Late accuracy:",
+        "Late hit rate:",
         round(
-            trader["late_accuracy"] * 100,
-            2
+            trader[
+                "late_hit_rate"
+            ]
+            * 100,
+            2,
         ),
-        "%"
+        "%",
     )
 
 
-# --------------------------------------------------
-# 7. Сохраняем CSV
-# --------------------------------------------------
-
 with open(
-    RESULTS_DIR / "trader_accuracy.csv",
+    OUTPUT_FILE,
     "w",
     newline="",
-    encoding="utf-8"
+    encoding="utf-8",
 ) as file:
 
     fieldnames = [
         "wallet",
         "buy_count",
         "winning_buy_count",
-        "accuracy",
+        "hit_rate",
+        "baseline_hit_rate",
+        "edge_vs_baseline",
         "buy_volume",
         "winning_buy_volume",
         "winning_volume_ratio",
@@ -381,22 +532,68 @@ with open(
         "markets",
         "late_buy_count",
         "late_winning_buy_count",
-        "late_accuracy"
+        "late_hit_rate",
     ]
 
     writer = csv.DictWriter(
         file,
-        fieldnames=fieldnames
+        fieldnames=fieldnames,
     )
 
     writer.writeheader()
 
     for trader in results:
-        writer.writerow(trader)
+        writer.writerow(
+            trader
+        )
 
 
 print()
-print("======================================")
-print("Готово!")
-print("Создан файл: trader_accuracy.csv")
-print("======================================")
+print(
+    "======================================"
+)
+print(
+    "DONE"
+)
+print(
+    "======================================"
+)
+
+print(
+    "Total BUY:",
+    total_buy_count,
+)
+
+print(
+    "Winning BUY:",
+    total_winning_buy_count,
+)
+
+print(
+    "Global BUY baseline:",
+    round(
+        baseline_hit_rate
+        * 100,
+        2,
+    ),
+    "%",
+)
+
+print(
+    "Unique BUY wallets:",
+    len(results),
+)
+
+print(
+    "Wallets with >=",
+    MIN_BUYS_FOR_DISPLAY,
+    "BUY:",
+    len(
+        filtered_results
+    ),
+)
+
+print(
+    "Created:",
+    OUTPUT_FILE,
+)

@@ -25,3 +25,9 @@ Thumbs.db
 data/raw/trades.csv
 data/processed/trades_with_outcome.csv
 data/processed/trades_with_timing.csv
+
+# Large generated result tables
+results/trader_accuracy.csv
+results/trader_edge.csv
+results/trader_market_signals.csv
+results/insider_ranking.csv

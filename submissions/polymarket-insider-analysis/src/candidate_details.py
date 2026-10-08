@@ -1,5 +1,7 @@
 import csv
+from collections import defaultdict
 from pathlib import Path
+
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
@@ -8,259 +10,651 @@ RESULTS_DIR = BASE_DIR / "results"
 
 RESULTS_DIR.mkdir(
     parents=True,
-    exist_ok=True
+    exist_ok=True,
+)
+
+RANKING_FILE = (
+    RESULTS_DIR
+    / "insider_ranking.csv"
+)
+
+TRADES_FILE = (
+    PROCESSED_DIR
+    / "trades_with_outcome.csv"
+)
+
+OUTPUT_FILE = (
+    RESULTS_DIR
+    / "candidate_details.csv"
+)
+
+
+TOP_CANDIDATES = 10
+
+LOW_PRICE_THRESHOLD = 0.50
+VERY_LOW_PRICE_THRESHOLD = 0.25
+LATE_HOURS = 24
+
+
+# --------------------------------------------------
+# 1. Load TOP candidates
+# --------------------------------------------------
+
+top_candidates = {}
+
+
+with open(
+    RANKING_FILE,
+    "r",
+    encoding="utf-8",
+) as file:
+
+    reader = csv.DictReader(
+        file
+    )
+
+    for row in reader:
+
+        try:
+            rank = int(
+                row[
+                    "rank"
+                ]
+            )
+
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+        ):
+            continue
+
+        if rank > TOP_CANDIDATES:
+            continue
+
+        wallet = row.get(
+            "wallet",
+            "",
+        ).strip()
+
+        if not wallet:
+            continue
+
+        top_candidates[
+            wallet
+        ] = {
+            "candidate_rank":
+                rank,
+
+            "candidate_score":
+                float(
+                    row.get(
+                        "candidate_score",
+                        0,
+                    )
+                ),
+
+            "signal_level":
+                row.get(
+                    "signal_level",
+                    "",
+                ),
+
+            "candidate_hit_rate":
+                float(
+                    row.get(
+                        "hit_rate",
+                        0,
+                    )
+                ),
+
+            "edge_vs_baseline":
+                float(
+                    row.get(
+                        "edge_vs_baseline",
+                        0,
+                    )
+                ),
+
+            "candidate_markets":
+                int(
+                    row.get(
+                        "markets",
+                        0,
+                    )
+                ),
+        }
+
+
+if len(
+    top_candidates
+) != TOP_CANDIDATES:
+
+    raise RuntimeError(
+        f"Expected {TOP_CANDIDATES} "
+        f"top candidates, found "
+        f"{len(top_candidates)}."
+    )
+
+
+print(
+    "TOP candidates loaded:",
+    len(top_candidates),
 )
 
 
 # --------------------------------------------------
-# 1. Берём TOP-10 из insider_ranking.csv
-# --------------------------------------------------
-
-top_wallets = set()
-
-with open(
-    RESULTS_DIR / "insider_ranking.csv",
-    "r",
-    encoding="utf-8"
-) as file:
-
-    reader = csv.DictReader(file)
-
-    for row in reader:
-
-        rank = int(row["rank"])
-
-        if rank <= 10:
-            top_wallets.add(
-                row["wallet"]
-            )
-
-
-print("TOP кошельков:", len(top_wallets))
-
-
-# --------------------------------------------------
-# 2. Выбираем интересные сделки
+# 2. Select interesting trades
 # --------------------------------------------------
 
 interesting_trades = []
 
+candidate_trade_counts = defaultdict(
+    int
+)
+
 
 with open(
-    PROCESSED_DIR / "trades_with_outcome.csv",
+    TRADES_FILE,
     "r",
-    encoding="utf-8"
+    encoding="utf-8",
 ) as file:
 
-    reader = csv.DictReader(file)
+    reader = csv.DictReader(
+        file
+    )
 
     for trade in reader:
 
-        wallet = trade["proxy_wallet"]
+        wallet = trade.get(
+            "proxy_wallet",
+            "",
+        ).strip()
 
-        if wallet not in top_wallets:
+        if wallet not in top_candidates:
             continue
 
-        if trade["side"] != "BUY":
+        # Only BUY
+        if (
+            trade.get(
+                "side",
+                "",
+            ).upper()
+            != "BUY"
+        ):
             continue
 
-        if trade["is_winning_buy"] != "1":
+        # Only BUY of eventual winner
+        if (
+            trade.get(
+                "is_winning_buy",
+                "",
+            )
+            != "1"
+        ):
             continue
 
+        try:
+            price = float(
+                trade.get(
+                    "price",
+                    0,
+                )
+            )
 
-        price = float(
-            trade["price"]
+            size = float(
+                trade.get(
+                    "size",
+                    0,
+                )
+            )
+
+        except (
+            ValueError,
+            TypeError,
+        ):
+            continue
+
+        if not (
+            0 <= price <= 1
+        ):
+            continue
+
+        if size < 0:
+            continue
+
+        # Only interesting low-price winner entries
+        if (
+            price
+            > LOW_PRICE_THRESHOLD
+        ):
+            continue
+
+        hours_raw = trade.get(
+            "hours_before_close",
+            "",
         )
 
-        size = float(
-            trade["size"]
+        hours_before_close = None
+
+        if hours_raw not in (
+            "",
+            None,
+        ):
+            try:
+                hours_before_close = float(
+                    hours_raw
+                )
+
+            except (
+                ValueError,
+                TypeError,
+            ):
+                hours_before_close = None
+
+        # A negative value means trade timestamp
+        # was after recorded closed_time.
+        trade_after_close = (
+            hours_before_close is not None
+            and hours_before_close < 0
         )
 
-        hours = trade[
-            "hours_before_close"
-        ]
+        very_low_price = (
+            price
+            <= VERY_LOW_PRICE_THRESHOLD
+        )
 
-
-        # Только интересные входы:
-        # победитель был куплен максимум по 50c
-        if price > 0.50:
-            continue
-
+        late_low_price = (
+            hours_before_close is not None
+            and 0
+            <= hours_before_close
+            <= LATE_HOURS
+        )
 
         volume = (
-            size * price
+            size
+            * price
         )
 
+        # BUY-only hold-to-resolution proxy
+        # for this winning BUY.
         profit_proxy = (
-            size * (1 - price)
+            size
+            * (1 - price)
         )
 
+        candidate = (
+            top_candidates[
+                wallet
+            ]
+        )
 
-        if hours != "":
-            hours_value = float(hours)
-        else:
-            hours_value = None
+        interesting_trades.append(
+            {
+                "candidate_rank":
+                    candidate[
+                        "candidate_rank"
+                    ],
 
+                "candidate_score":
+                    candidate[
+                        "candidate_score"
+                    ],
 
-        interesting_trades.append({
+                "signal_level":
+                    candidate[
+                        "signal_level"
+                    ],
 
-            "wallet":
-                wallet,
+                "candidate_hit_rate":
+                    candidate[
+                        "candidate_hit_rate"
+                    ],
 
-            "condition_id":
-                trade["condition_id"],
+                "edge_vs_baseline":
+                    candidate[
+                        "edge_vs_baseline"
+                    ],
 
-            "title":
-                trade["title"],
+                "candidate_markets":
+                    candidate[
+                        "candidate_markets"
+                    ],
 
-            "trade_date":
-                trade["trade_date"],
+                "wallet":
+                    wallet,
 
-            "closed_time":
-                trade["closed_time"],
+                "condition_id":
+                    trade.get(
+                        "condition_id",
+                        "",
+                    ),
 
-            "hours_before_close":
-                hours_value,
+                "title":
+                    trade.get(
+                        "title",
+                        "",
+                    ),
 
-            "outcome":
-                trade["outcome"],
+                "trade_date":
+                    trade.get(
+                        "trade_date",
+                        "",
+                    ),
 
-            "winning_outcome":
-                trade["winning_outcome"],
+                "closed_time":
+                    trade.get(
+                        "closed_time",
+                        "",
+                    ),
 
-            "price":
-                price,
+                "hours_before_close":
+                    hours_before_close,
 
-            "size":
-                size,
+                "outcome":
+                    trade.get(
+                        "outcome",
+                        "",
+                    ),
 
-            "volume":
-                volume,
+                "winning_outcome":
+                    trade.get(
+                        "winning_outcome",
+                        "",
+                    ),
 
-            "profit_proxy":
-                profit_proxy,
+                "price":
+                    price,
 
-            "transaction_hash":
-                trade["transaction_hash"]
-        })
+                "size":
+                    size,
+
+                "volume":
+                    volume,
+
+                "profit_proxy":
+                    profit_proxy,
+
+                "very_low_price":
+                    very_low_price,
+
+                "late_low_price":
+                    late_low_price,
+
+                "trade_after_close":
+                    trade_after_close,
+
+                "transaction_hash":
+                    trade.get(
+                        "transaction_hash",
+                        "",
+                    ),
+            }
+        )
+
+        candidate_trade_counts[
+            wallet
+        ] += 1
 
 
 # --------------------------------------------------
-# 3. Сортируем
+# 3. Sort for CSV
+#
+# First candidate rank, then strongest individual
+# proxy-profit trade inside that candidate.
 # --------------------------------------------------
 
 interesting_trades.sort(
     key=lambda trade: (
-        trade["wallet"],
-        -trade["profit_proxy"]
+        trade[
+            "candidate_rank"
+        ],
+        -trade[
+            "profit_proxy"
+        ],
     )
 )
 
 
 # --------------------------------------------------
-# 4. Создаём CSV
+# 4. Save CSV
 # --------------------------------------------------
 
+fieldnames = [
+    "candidate_rank",
+    "candidate_score",
+    "signal_level",
+
+    "candidate_hit_rate",
+    "edge_vs_baseline",
+    "candidate_markets",
+
+    "wallet",
+
+    "condition_id",
+    "title",
+
+    "trade_date",
+    "closed_time",
+    "hours_before_close",
+
+    "outcome",
+    "winning_outcome",
+
+    "price",
+    "size",
+    "volume",
+
+    "profit_proxy",
+
+    "very_low_price",
+    "late_low_price",
+    "trade_after_close",
+
+    "transaction_hash",
+]
+
+
 with open(
-    RESULTS_DIR / "candidate_details.csv",
+    OUTPUT_FILE,
     "w",
     newline="",
-    encoding="utf-8"
+    encoding="utf-8",
 ) as file:
-
-    fieldnames = [
-        "wallet",
-        "condition_id",
-        "title",
-        "trade_date",
-        "closed_time",
-        "hours_before_close",
-        "outcome",
-        "winning_outcome",
-        "price",
-        "size",
-        "volume",
-        "profit_proxy",
-        "transaction_hash"
-    ]
 
     writer = csv.DictWriter(
         file,
-        fieldnames=fieldnames
+        fieldnames=fieldnames,
     )
 
     writer.writeheader()
 
     for trade in interesting_trades:
-        writer.writerow(trade)
+        writer.writerow(
+            trade
+        )
 
 
 # --------------------------------------------------
-# 5. Показываем TOP интересных сделок
+# 5. Display candidate coverage
 # --------------------------------------------------
 
-interesting_trades.sort(
-    key=lambda trade:
-        trade["profit_proxy"],
-    reverse=True
+print()
+print(
+    "======================================"
+)
+print(
+    "TOP CANDIDATE TRADE COVERAGE"
+)
+print(
+    "======================================"
+)
+
+
+for wallet, candidate in sorted(
+    top_candidates.items(),
+    key=lambda item:
+        item[1][
+            "candidate_rank"
+        ],
+):
+
+    print(
+        "Rank:",
+        candidate[
+            "candidate_rank"
+        ],
+        "| Wallet:",
+        wallet,
+        "| interesting trades:",
+        candidate_trade_counts[
+            wallet
+        ],
+    )
+
+
+# --------------------------------------------------
+# 6. TOP individual interesting trades
+# --------------------------------------------------
+
+top_trades = sorted(
+    interesting_trades,
+    key=lambda trade: (
+        trade[
+            "late_low_price"
+        ],
+        trade[
+            "very_low_price"
+        ],
+        trade[
+            "profit_proxy"
+        ],
+    ),
+    reverse=True,
 )
 
 
 print()
-print("======================================")
-print("TOP-30 ИНТЕРЕСНЫХ СДЕЛОК")
-print("======================================")
+print(
+    "======================================"
+)
+print(
+    "TOP-30 INTERESTING WINNING BUY TRADES"
+)
+print(
+    "======================================"
+)
 
 
-for trade in interesting_trades[:30]:
+for trade in top_trades[
+    :30
+]:
 
     print()
 
     print(
+        "Candidate rank:",
+        trade[
+            "candidate_rank"
+        ],
+    )
+
+    print(
         "Wallet:",
-        trade["wallet"]
+        trade[
+            "wallet"
+        ],
     )
 
     print(
         "Market:",
-        trade["title"]
+        trade[
+            "title"
+        ],
     )
 
     print(
         "Outcome:",
-        trade["outcome"]
+        trade[
+            "outcome"
+        ],
     )
 
     print(
         "Price:",
-        trade["price"]
+        trade[
+            "price"
+        ],
+    )
+
+    print(
+        "Very low price:",
+        trade[
+            "very_low_price"
+        ],
     )
 
     print(
         "Hours before close:",
-        trade["hours_before_close"]
+        trade[
+            "hours_before_close"
+        ],
+    )
+
+    print(
+        "Late low price:",
+        trade[
+            "late_low_price"
+        ],
     )
 
     print(
         "Volume:",
         round(
-            trade["volume"],
-            2
-        )
+            trade[
+                "volume"
+            ],
+            2,
+        ),
     )
 
     print(
-        "Profit proxy:",
+        "BUY-only profit proxy:",
         round(
-            trade["profit_proxy"],
-            2
-        )
+            trade[
+                "profit_proxy"
+            ],
+            2,
+        ),
     )
 
 
 print()
-print("======================================")
 print(
-    "Создан файл: candidate_details.csv"
+    "======================================"
 )
-print("======================================")
+print(
+    "DONE"
+)
+print(
+    "======================================"
+)
+
+print(
+    "Top candidates:",
+    len(
+        top_candidates
+    ),
+)
+
+print(
+    "Interesting trades:",
+    len(
+        interesting_trades
+    ),
+)
+
+print(
+    "Created:",
+    OUTPUT_FILE,
+)
