@@ -57,6 +57,9 @@ traders = defaultdict(
 total_buy_count = 0
 total_winning_buy_count = 0
 
+post_close_buy_excluded = 0
+missing_timing_buy_excluded = 0
+
 
 with open(
     INPUT_FILE,
@@ -141,21 +144,30 @@ with open(
             "",
         )
 
-        hours = None
-
-        if hours_raw not in (
+        # Exclude post-close observations from predictive
+        # metrics and the BUY-only profit proxy.
+        if hours_raw in (
             "",
             None,
         ):
-            try:
-                hours = float(
-                    hours_raw
-                )
-            except (
-                ValueError,
-                TypeError,
-            ):
-                hours = None
+            missing_timing_buy_excluded += 1
+            continue
+
+        try:
+            hours = float(
+                hours_raw
+            )
+
+        except (
+            ValueError,
+            TypeError,
+        ):
+            missing_timing_buy_excluded += 1
+            continue
+
+        if hours < 0:
+            post_close_buy_excluded += 1
+            continue
 
         stats = traders[
             wallet
@@ -605,6 +617,16 @@ print(
 print(
     "Wallets analyzed:",
     len(results),
+)
+
+print(
+    "Post-close BUY excluded from predictive metrics:",
+    post_close_buy_excluded,
+)
+
+print(
+    "BUY with missing/invalid timing excluded:",
+    missing_timing_buy_excluded,
 )
 
 print(

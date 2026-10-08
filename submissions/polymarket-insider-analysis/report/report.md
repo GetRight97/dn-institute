@@ -4,214 +4,185 @@
 
 The objective of this analysis is to identify Polymarket wallets whose public trading behavior is unusually consistent with patterns that may warrant further investigation for potentially informed trading.
 
-The study covers trades between:
+The study covers trades from **November 1, 2025 to May 1, 2026**.
 
-**November 1, 2025 and May 1, 2026**
+The analysis is heuristic and behavioral. A high score does **not** prove that a wallet possessed material non-public information and should not be interpreted as an accusation of insider trading, market manipulation, or other misconduct.
 
-The analysis is heuristic and behavioral.
-
-A high score does **not** prove that a wallet possessed material non-public information and should not be interpreted as an accusation of insider trading, market manipulation, or any other misconduct.
-
-The purpose of the project is to build a reproducible screening framework that highlights wallets, markets, and trades that deserve closer manual investigation.
+The project is designed as a reproducible screening framework that prioritizes wallets, markets, and trades for closer investigation.
 
 ---
 
 ## 2. Dataset Scope
 
-The final analysis uses a deliberately scoped market universe rather than attempting to crawl every Polymarket market in the period.
+The final analysis uses a deliberately scoped market universe.
 
-The market-selection procedure chooses:
+The selection procedure chooses the **20 highest-volume closed Polymarket markets** returned under the selected date filters while rejecting markets with missing or inverted date ranges.
 
-> the 20 highest-volume closed Polymarket markets returned by the public SDK under the selected date filters.
-
-The scheduled market end date must satisfy:
+A market is accepted only when:
 
 ```text
-2025-11-01 <= endDate < 2026-05-01
+start_date is present
+end_date is present
+start_date < end_date
+2025-11-01 <= end_date < 2026-05-01
 ```
 
-The selected universe is saved to:
+The fixed universe is persisted in:
 
 ```text
 data/raw/market_dates.csv
 ```
 
-All downstream trade collection uses these fixed condition IDs.
-
-This makes the final sample explicit and reproducible.
-
 ### Final dataset
 
-The selected universe contains:
+The final rerun produced:
 
 - **20 selected markets**
+- **18 markets with trades inside the analysis window**
 - **20 / 20 markets successfully retrieved during outcome enrichment**
 - **20 / 20 markets with an identified final winning outcome**
-- **18 markets with trades inside the analysis window**
-- **1,425,219 trades returned by the trade API for the selected markets**
-- **1,187,786 trades inside the analysis period**
-- **794,187 BUY trades**
-- **463,273 BUY trades on the eventual winning outcome**
-- **207,119 unique BUY wallets**
+- **1,562,144 trades returned by the Polymarket Data API**
+- **1,253,275 trades inside the analysis period**
+- **826,178 raw BUY trades in the enriched dataset**
+- **22 total trades after recorded `closed_time`**
+- **11 post-close BUY trades excluded from predictive metrics**
+- **826,167 predictive BUY trades**
+- **490,382 predictive BUY trades on the eventual winning outcome**
+- **214,824 unique predictive BUY wallets**
 
-The resulting global BUY outcome hit rate is:
+The resulting global predictive BUY hit-rate baseline is:
 
 ```text
-463,273 / 794,187 = 58.33%
+490,382 / 826,167 = 59.36%
 ```
 
-This value is used as a descriptive trade-weighted baseline.
-
-It should not be interpreted as the accuracy of the average trader because highly active wallets can contribute many observations.
+This is a trade-weighted descriptive baseline, not the accuracy of the average trader.
 
 ### Scope limitation
 
-This is not a complete census of all Polymarket activity between November 2025 and May 2026.
+This is not a complete census of Polymarket activity during the period.
 
-The sample intentionally prioritizes highly liquid markets.
-
-Potentially informed behavior occurring only in lower-volume markets may therefore be absent from the analysis.
+The sample intentionally prioritizes highly liquid closed markets. Potentially informed behavior occurring only in lower-volume markets may therefore be absent.
 
 ---
 
-## 3. Data Sources
+## 3. Primary Data Sources and Provenance
 
 The project uses public Polymarket data.
 
-### 3.1 Market discovery and metadata
+### 3.1 Polymarket Data API v2
 
-Market discovery and market metadata are retrieved through the Polymarket public SDK / Gamma market-data interface.
+Official documentation:
 
-The relevant project script is:
+https://data-api.polymarket.com/v2/docs
 
-```text
-src/market_dates.py
-```
-
-The market request uses the following selection logic:
-
-```text
-closed = true
-end_date_min = 2025-11-01
-end_date_max = 2026-05-01
-order = volume
-ascending = false
-```
-
-The resulting condition IDs and market dates are persisted before trade collection.
-
-### 3.2 Trade data
-
-Historical public trade data is retrieved from the Polymarket Data API v2 endpoint:
+Historical trade data is retrieved from:
 
 ```text
 https://data-api.polymarket.com/v2/trades
 ```
 
-The relevant project script is:
+Relevant script:
 
 ```text
 src/collect_data.py
 ```
 
-Trades are downloaded separately for each selected market using its `condition_id`.
+The official Data API documentation describes the public trade feed and cursor-based pagination behavior used by the collector.
 
-The collector uses cursor pagination and continues until the available trade history for the market is exhausted.
+The collector uses:
 
-The implementation includes:
+- a fixed market `condition_id`
+- cursor pagination
+- request timeouts
+- HTTP status handling
+- rate-limit handling
+- retries with backoff
+- local filtering to the analysis period
 
-- request timeout handling
-- retry handling
-- HTTP 429 handling
-- exponential backoff
-- retry handling for temporary 5xx failures
+### 3.2 Polymarket Gamma API
 
-After collection, trades are restricted to:
+Official documentation:
 
-```text
-2025-11-01 <= trade timestamp < 2026-05-01
-```
+https://gamma-api.polymarket.com/docs
 
-### 3.3 Market outcomes
+Market discovery and historical market metadata are accessed through the Polymarket public SDK / Gamma interface.
 
-Final market state and outcome metadata are retrieved using the public Polymarket SDK.
-
-The relevant project script is:
+Relevant scripts:
 
 ```text
+src/market_dates.py
 src/market_outcomes.py
 ```
 
-For each selected condition ID, the script retrieves:
+The market-selection process orders closed markets by volume and applies the target date filter. Local validation rejects missing or invalid temporal ranges before a market is appended to the fixed universe.
 
-- market title
-- closed state
-- recorded `closed_time`
-- scheduled end date
-- final outcome prices
-- winning outcome
-- UMA status when exposed by the market object
+### 3.3 Polymarket market mechanics
 
-The script uses retries and fails rather than silently creating an incomplete result if required market lookups fail.
+Official documentation:
+
+https://docs.polymarket.com/faq
+
+This source documents the basic mechanics of outcome shares, market prices, and settlement values used when interpreting trades and hold-to-resolution payoff.
+
+### 3.4 Headline statistic provenance
+
+Headline statistics are produced directly by the included pipeline.
+
+```text
+data/raw/market_dates.csv
+        ↓
+src/collect_data.py
+        ↓
+data/raw/trades.csv
+        ↓
+src/market_outcomes.py
+        ↓
+data/processed/market_outcomes.csv
+        ↓
+src/trades_with_outcome.py
+        ↓
+data/processed/trades_with_outcome.csv
+        ↓
+src/trader_accuracy.py
+src/trader_edge.py
+src/trader_market_signals.py
+        ↓
+src/insider_score.py
+        ↓
+results/insider_ranking.csv
+results/insider_ranking_top100.csv
+        ↓
+src/candidate_details.py
+        ↓
+results/candidate_details.csv
+```
+
+The counts in this report correspond to the final rerun after the market-date and post-close leakage fixes.
 
 ---
 
-## 4. Data Integrity Checks
+## 4. Market Resolution and Timing
 
-All:
+All 20 selected condition IDs were successfully retrieved during outcome enrichment.
 
-```text
-1,187,786
-```
+All 20 selected markets had:
 
-in-window trades were successfully matched to market outcome metadata.
+- recorded `closed_time`
+- resolved final state
+- identifiable winning outcome
 
-All trades in the processed dataset are associated with markets for which a winning outcome could be identified.
+All **1,253,275** in-window trades were successfully matched to market metadata.
+
+Timing was available for every processed trade.
 
 The enriched dataset contains:
 
 ```text
-794,187 BUY trades
-463,273 winning BUY trades
+22 trades after recorded closed_time
 ```
 
-The BUY hit-rate baseline is therefore:
-
-```text
-58.33%
-```
-
-Timing data is available for all processed trades.
-
-A diagnostic check found:
-
-```text
-23 trades
-```
-
-whose timestamps occur after the market's recorded `closed_time`.
-
-These trades represent only a very small fraction of the dataset.
-
-They are retained for diagnostics but are excluded from late-trading heuristics because the late-trade condition explicitly requires:
-
-```text
-hours_before_close >= 0
-```
-
----
-
-## 5. Market Resolution and Timing
-
-An earlier version of the project relied more heavily on scheduled market end dates.
-
-The final methodology instead uses Polymarket's recorded:
-
-```text
-closed_time
-```
-
-when measuring proximity to closure.
+Those rows are retained for diagnostics rather than deleted from the source-derived dataset.
 
 For each trade:
 
@@ -220,103 +191,93 @@ hours_before_close =
 closed_time - trade_timestamp
 ```
 
-A positive value means the trade occurred before the recorded close.
+A positive value means the trade occurred before recorded close. A negative value means it occurred after recorded close.
 
-A negative value means the trade timestamp appears after the recorded close.
+`closed_time` should not be interpreted as the exact moment when decisive information became public. It is used only as a consistent market-timing reference.
 
-`closed_time` remains only a proxy for the information environment.
+---
 
-It does not establish when the decisive underlying information became public.
+## 5. Outcome-Leakage Protection
 
-For example, a market may remain open for some time after an event becomes widely known, or its recorded close may not exactly correspond to the information-release timestamp.
+A central review correction was to prevent post-close observations from entering predictive metrics.
 
-Timing signals are therefore used only for candidate generation.
+The final predictive scripts require:
+
+```text
+hours_before_close >= 0
+```
+
+before updating wallet statistics.
+
+The enriched dataset contains 22 post-close trades in total. Of those, **11 are BUY trades**.
+
+Those 11 BUYs are excluded before calculating:
+
+- total BUY count
+- winning BUY count
+- hit rate
+- BUY volume
+- BUY-only hold-to-resolution profit proxy
+- low-price win counts
+- very-low-price win counts
+- late low-price win counts
+- wallet + market aggregates
+- final ranking inputs
+
+The final predictive population is therefore:
+
+```text
+826,167 BUY trades
+490,382 winning BUY trades
+59.36% global BUY hit-rate baseline
+```
+
+The raw enriched dataset remains auditable while predictive metrics avoid post-outcome leakage.
 
 ---
 
 ## 6. Heuristics
 
-The analysis uses several complementary behavioral signals.
+No single metric is treated as sufficient evidence.
 
-No single metric is treated as sufficient evidence on its own.
+### 6.1 Winning BUY hit rate
 
----
-
-### 6.1 Winning BUY Hit Rate
-
-A BUY is considered directionally correct when the purchased outcome eventually wins.
-
-In simplified form:
-
-```text
-trade outcome == final winning outcome
-```
-
-SELL trades are excluded from directional hit-rate calculations.
-
-A SELL can represent:
-
-- closing an existing position
-- reducing exposure
-- hedging
-- market-making inventory management
-- portfolio rebalancing
-
-Therefore, a SELL is not safely interpretable as a direct prediction about the final outcome.
-
-For each wallet:
+A BUY is directionally correct when the purchased outcome ultimately resolves as the winner.
 
 ```text
 hit_rate =
-winning BUY count / total BUY count
+winning BUY count / predictive BUY count
 ```
 
-The wallet is also compared with the dataset baseline:
+Each wallet is compared with the global predictive baseline:
+
+```text
+59.36%
+```
+
+and:
 
 ```text
 edge_vs_baseline =
-wallet hit rate - 58.33%
+wallet hit rate - 59.36%
 ```
 
-High hit rate alone is not treated as strong evidence because traders may repeatedly buy outcomes already priced near certainty.
+SELL trades are not interpreted directionally because a SELL can represent closing a position, hedging, inventory management, or exposure reduction.
 
----
-
-### 6.2 Low-Price Winning Entries
-
-A correct trade is more informative when the winning outcome was relatively inexpensive at entry.
+### 6.2 Low-price winning entries
 
 Two thresholds are used:
 
 ```text
-low-price win:
-price <= 0.50
-
-very-low-price win:
-price <= 0.25
+low-price win:      price <= 0.50
+very-low-price win: price <= 0.25
 ```
 
-For example:
+A correct entry at a relatively low price is treated as more behaviorally unusual than purchasing an outcome already priced near certainty.
 
-```text
-BUY eventual winner at 0.95
-```
+These thresholds are heuristic rather than formal statistical tests.
 
-provides less unusual evidence than:
-
-```text
-BUY eventual winner at 0.15
-```
-
-because the latter was priced as substantially less likely by the market.
-
-These thresholds are heuristic rather than formal probability tests.
-
----
-
-### 6.3 Late Low-Price Winning Entries
-
-Timing becomes more interesting when a trader buys the eventual winning outcome at a relatively low price shortly before the market closes.
+### 6.3 Late low-price winning entries
 
 A late low-price winning BUY is defined as:
 
@@ -327,17 +288,9 @@ price <= 0.50
 0 <= hours_before_close <= 24
 ```
 
-Trades after recorded `closed_time` do not qualify.
+This surfaces correct low-price positioning near recorded market closure without using post-close observations.
 
-This heuristic attempts to surface cases where successful low-price positioning occurred close to market closure.
-
-It does not establish whether the relevant information was already public at the time.
-
----
-
-### 6.4 BUY-Only Hold-to-Resolution Profit Proxy
-
-For BUY trades, the project calculates a hypothetical hold-to-resolution payoff proxy.
+### 6.4 BUY-only hold-to-resolution profit proxy
 
 For a winning BUY:
 
@@ -353,322 +306,93 @@ profit_proxy = -size * price
 
 This is **not realized P&L**.
 
-The calculation assumes that every BUY position is held until resolution.
+It assumes each BUY is held to resolution and ignores SELLs, exits, hedges, offsetting positions, transfers, fees, and complete position reconstruction.
 
-It ignores:
+### 6.5 Wallet + market aggregation
 
-- SELL trades
-- partial exits
-- hedging
-- offsetting positions
-- portfolio netting
-- transfers
-- execution costs
-- complete position history
+A single economic position may be split across many fills.
 
-For that reason, the metric is described throughout the project as:
-
-**BUY-only hold-to-resolution profit proxy**
-
-It is used only as one behavioral feature in the ranking.
-
----
-
-### 6.5 Wallet + Market Aggregation
-
-Trade-level statistics can be misleading because a single economic position may be split into many fills.
-
-For example:
-
-```text
-100 successful BUY fills
-```
-
-inside one market are not equivalent to 100 independent correct predictions.
-
-To reduce this problem, the main signal pipeline first aggregates activity at:
+To avoid treating every fill as independent evidence, the main signal pipeline first aggregates at:
 
 ```text
 wallet + market
 ```
 
-level.
+and then summarizes repeated evidence across markets.
 
-For each wallet, the analysis then counts how many distinct markets contain:
+For each wallet, the analysis measures:
 
-- positive BUY-only profit proxy
-- winning low-price BUYs
-- winning very-low-price BUYs
-- late winning low-price BUYs
-
-This gives cross-market repetition more weight than repeated fills within one market.
-
----
-
-### 6.6 Cross-Market Signal Ratios
-
-Absolute counts can also be misleading.
-
-For example:
-
-```text
-4 very-low-price winning markets out of 4
-```
-
-is behaviorally different from:
-
-```text
-4 very-low-price winning markets out of 18
-```
-
-The pipeline therefore calculates both:
-
-- number of markets containing the signal
-- proportion of the wallet's markets containing the signal
-
-This is used for both very-low-price and late low-price components.
+- number of markets traded
+- profitable markets under the BUY-only proxy
+- low-price winning markets
+- very-low-price winning markets
+- late low-price winning markets
+- corresponding cross-market ratios
 
 ---
 
-## 7. Exploratory Trader Metrics
+## 7. Exploratory Predictive Metrics
 
-### 7.1 Trader hit-rate analysis
-
-The trader-level hit-rate script identified:
+The final trader-level rerun produced:
 
 ```text
-207,119 unique BUY wallets
+214,824 predictive BUY wallets
+3,889 wallets with at least 20 BUY trades
 ```
 
-and:
+The wallet-market aggregation produced:
 
 ```text
-3,799 wallets
+312,933 wallet-market combinations
+21,638 wallets active in at least 3 markets
 ```
 
-with at least 20 BUY trades.
-
-The global baseline remained:
+Both `trader_accuracy.py` and `trader_edge.py` reported:
 
 ```text
-58.33%
+11 post-close BUY excluded
+0 BUY with missing/invalid timing excluded
 ```
 
-throughout the pipeline, confirming consistency between the enriched trade data and trader-level aggregation.
+`trader_market_signals.py` reported the same 11 post-close BUYs excluded before predictive aggregation.
 
-### 7.2 Cross-market aggregation
-
-The market-signal aggregation produced:
-
-```text
-300,188 wallet-market combinations
-```
-
-and:
-
-```text
-20,234 wallets
-```
-
-that traded at least 3 distinct markets.
-
-This stage is important because many wallets with apparently impressive trade-level hit rates are concentrated in only one market.
+This consistency is an internal validation check.
 
 ---
 
 ## 8. Candidate Ranking Model
 
-Each wallet receives a final candidate score from:
+Each wallet receives a final candidate score from 0 to 100.
 
-```text
-0 to 100
-```
-
-The score is an **investigation-priority heuristic**.
-
-It is not a probability that the wallet engaged in insider trading.
-
-The raw score consists of seven components:
+The score is an **investigation-priority heuristic**, not a probability of insider trading.
 
 | Component | Maximum Score |
 |---|---:|
 | Very-low-price cross-market evidence | 25 |
 | Late low-price cross-market evidence | 20 |
 | BUY hit-rate edge vs baseline | 20 |
-| Positive proxy across markets | 15 |
+| Profitable-market ratio | 15 |
 | BUY-only hold-to-resolution profit proxy | 10 |
 | Cross-market breadth | 5 |
 | BUY volume | 5 |
 | **Total** | **100** |
 
----
+### Reliability adjustment
 
-### 8.1 Very-Low-Price Cross-Market Evidence
+Small samples can generate extreme metrics by chance.
 
-Maximum contribution:
+The raw candidate score is multiplied by a reliability factor based on:
 
-**25 points**
-
-This component combines:
-
-- absolute number of markets containing a winning BUY at `price <= 0.25`
-- proportion of the wallet's markets containing that signal
-
-The count component reaches its cap at approximately four affected markets.
-
-The ratio component reaches its cap when the signal appears on approximately 75% of the wallet's markets.
-
----
-
-### 8.2 Late Low-Price Cross-Market Evidence
-
-Maximum contribution:
-
-**20 points**
-
-This component combines:
-
-- number of markets containing a late low-price winning BUY
-- proportion of the wallet's markets containing that signal
-
-The count component reaches its cap at approximately three affected markets.
-
-The ratio component reaches its cap when the signal appears on approximately 25% of the wallet's markets.
-
----
-
-### 8.3 Hit-Rate Edge vs Baseline
-
-Maximum contribution:
-
-**20 points**
-
-The dataset BUY baseline is:
-
-```text
-58.33%
-```
-
-Only positive edge contributes.
-
-An edge of approximately:
-
-```text
-+25 percentage points
-```
-
-reaches the maximum score for this component.
-
-This feature prevents wallets with hit rates below or near the overall baseline from ranking highly solely because they have many low-price fills.
-
----
-
-### 8.4 Profitable-Market Ratio
-
-Maximum contribution:
-
-**15 points**
-
-This measures the fraction of markets in which the wallet has positive aggregate BUY-only hold-to-resolution profit proxy.
-
-A ratio of approximately:
-
-```text
-80%+
-```
-
-reaches the maximum contribution.
-
----
-
-### 8.5 BUY-Only Profit Proxy
-
-Maximum contribution:
-
-**10 points**
-
-Positive proxy profit is log-scaled.
-
-This prevents one very large account from dominating the ranking solely through position size.
-
-Approximately:
-
-```text
-$100,000 positive proxy
-```
-
-reaches the maximum component score.
-
-Again, this is not realized P&L.
-
----
-
-### 8.6 Cross-Market Breadth
-
-Maximum contribution:
-
-**5 points**
-
-This component gives modest credit to wallets that demonstrate behavior across multiple markets.
-
-Approximately eight markets reach the maximum breadth contribution.
-
-The small weight is intentional because the final scoped universe contains only 18 markets with in-window trades.
-
----
-
-### 8.7 BUY Volume
-
-Maximum contribution:
-
-**5 points**
-
-BUY volume is log-scaled.
-
-Approximately:
-
-```text
-$100,000 BUY volume
-```
-
-reaches the cap.
-
-Volume alone is not treated as evidence of informed trading.
-
----
-
-## 9. Reliability Adjustment
-
-Small samples can produce extreme results by chance.
-
-For example:
-
-```text
-3 winning BUYs out of 3
-```
-
-should not receive the same evidentiary weight as:
-
-```text
-hundreds of BUYs across several markets
-```
-
-The raw candidate score is therefore multiplied by a reliability factor based on:
-
-- number of BUY trades
+- predictive BUY count
 - number of distinct markets
 
-The adjustment does not eliminate small wallets completely.
+This reduces the influence of wallets with limited evidence without automatically discarding them.
 
-It modestly reduces their score until there is a broader evidence base.
-
-This reliability factor is itself heuristic and is not a formal statistical significance test.
+The reliability adjustment is heuristic and is not a formal significance test.
 
 ---
 
-## 10. Signal-Level Interpretation
-
-The final score is mapped to a descriptive signal level:
+## 9. Signal-Level Interpretation
 
 | Candidate Score | Signal Level |
 |---:|---|
@@ -678,257 +402,36 @@ The final score is mapped to a descriptive signal level:
 | >= 30 | MODERATE |
 | < 30 | LOW |
 
-The labels describe only:
+These labels describe only how strongly observable behavior matches the selected heuristics.
 
-> how strongly the wallet matches the selected behavioral heuristics.
-
-They are **not**:
-
-- legal risk ratings
-- insider-trading probabilities
-- compliance determinations
-- accusations of misconduct
+They are not legal risk ratings, probabilities of insider trading, or accusations of misconduct.
 
 ---
 
-## 11. Top Ranked Wallets
+## 10. Final Ranking
 
 The final ranking contains:
 
 ```text
-207,119 wallets
+214,824 wallets
 ```
 
-The ten highest-ranked candidates are:
+The top ten candidates are:
 
-| Rank | Wallet | Score | Signal | Markets | BUY | Hit Rate |
-|---:|---|---:|---|---:|---:|---:|
-| 1 | `0xcf6a714618a328c608a1c70cb62a31a6bef3f9d0` | 76.10 | VERY HIGH | 8 | 155 | 85.16% |
-| 2 | `0x10b289276b2b69cac7b1bbc58601009b6ee74ceb` | 70.29 | HIGH | 11 | 852 | 81.92% |
-| 3 | `0xad529df14c293d77984a0137990a1441b25211ac` | 67.79 | HIGH | 11 | 119 | 73.11% |
-| 4 | `0xd6639bff2beb2bcc0cfedc27e0f7980964e1ca64` | 67.37 | HIGH | 6 | 138 | 73.19% |
-| 5 | `0xc9db6c957b2ba169608907443f3991b8d01b2ad3` | 67.15 | HIGH | 6 | 579 | 92.23% |
-| 6 | `0xdde1a0257ddcc19522df5128049ce5619944f1d7` | 64.80 | HIGH | 6 | 97 | 85.57% |
-| 7 | `0x8f42ae0a01c0383c7ca8bd060b86a645ee74b88f` | 64.31 | HIGH | 7 | 60 | 88.33% |
-| 8 | `0xb22326c1770aa89dfb2b372137e570a360433772` | 63.70 | HIGH | 4 | 139 | 89.93% |
-| 9 | `0x86ce8bf4ea6334796156e558642f83f4df0d8af5` | 63.60 | HIGH | 9 | 116 | 93.10% |
-| 10 | `0xbb39ba863319281427a482c8714ffdf69cb7ee8a` | 63.53 | HIGH | 7 | 195 | 67.69% |
+| Rank | Wallet | Score | Signal | Markets | BUY | Hit Rate | Edge vs Baseline |
+|---:|---|---:|---|---:|---:|---:|---:|
+| 1 | `0xcf6a714618a328c608a1c70cb62a31a6bef3f9d0` | 76.10 | VERY HIGH | 8 | 155 | 85.16% | +25.81 pp |
+| 2 | `0x10b289276b2b69cac7b1bbc58601009b6ee74ceb` | 69.67 | HIGH | 10 | 851 | 81.90% | +22.55 pp |
+| 3 | `0xc9db6c957b2ba169608907443f3991b8d01b2ad3` | 67.15 | HIGH | 6 | 579 | 92.23% | +32.87 pp |
+| 4 | `0xad529df14c293d77984a0137990a1441b25211ac` | 66.97 | HIGH | 11 | 119 | 73.11% | +13.75 pp |
+| 5 | `0xd6639bff2beb2bcc0cfedc27e0f7980964e1ca64` | 66.55 | HIGH | 6 | 138 | 73.19% | +13.83 pp |
+| 6 | `0xdde1a0257ddcc19522df5128049ce5619944f1d7` | 64.80 | HIGH | 6 | 97 | 85.57% | +26.21 pp |
+| 7 | `0x8f42ae0a01c0383c7ca8bd060b86a645ee74b88f` | 64.31 | HIGH | 7 | 60 | 88.33% | +28.98 pp |
+| 8 | `0x86ce8bf4ea6334796156e558642f83f4df0d8af5` | 63.98 | HIGH | 8 | 114 | 92.98% | +33.63 pp |
+| 9 | `0x09fe78c8b9f10fb9c7c0a584bfab4205c76876ee` | 62.76 | HIGH | 11 | 447 | 93.29% | +33.93 pp |
+| 10 | `0xbb39ba863319281427a482c8714ffdf69cb7ee8a` | 62.71 | HIGH | 7 | 195 | 67.69% | +8.34 pp |
 
----
-
-## 12. Candidate Analysis
-
-### 12.1 Rank 1 — `0xcf6a7146...`
-
-The highest-ranked wallet has:
-
-```text
-Candidate score:        76.10 / 100
-Signal level:           VERY HIGH
-Reliability:            100%
-Markets:                8
-BUY trades:             155
-Hit rate:               85.16%
-Global baseline:        58.33%
-Edge vs baseline:       +26.83 percentage points
-Profitable-market ratio: 62.5%
-Very-low-price markets: 3 / 8
-Late low-price markets: 1 / 8
-BUY-only profit proxy:  ~$78,919.51
-BUY volume:             ~$108,422.21
-```
-
-The wallet ranks highly because several different signals occur together:
-
-- hit rate substantially above baseline
-- cross-market activity
-- repeated very-low-price winning entries
-- at least one late low-price winning market
-- meaningful BUY volume
-- substantial positive BUY-only proxy
-
-This makes the wallet a useful candidate for manual follow-up.
-
-It does not establish why the trading pattern occurred.
-
----
-
-### 12.2 Rank 2 — `0x10b28927...`
-
-Observed characteristics:
-
-```text
-Candidate score:        70.29 / 100
-Signal level:           HIGH
-Reliability:            100%
-Markets:                11
-BUY trades:             852
-Hit rate:               81.92%
-Edge vs baseline:       +23.59 percentage points
-Profitable-market ratio: 72.73%
-Very-low-price markets: 3 / 11
-Late low-price markets: 1 / 11
-BUY-only profit proxy:  ~$2,227.30
-BUY volume:             ~$16,718.55
-```
-
-This wallet combines a large number of BUY observations with a hit rate materially above the dataset baseline.
-
-Its score is driven more by consistency and hit-rate edge than by absolute proxy profit.
-
----
-
-### 12.3 Rank 3 — `0xad529df1...`
-
-Observed characteristics:
-
-```text
-Candidate score:        67.79 / 100
-Signal level:           HIGH
-Reliability:            100%
-Markets:                11
-BUY trades:             119
-Hit rate:               73.11%
-Edge vs baseline:       +14.78 percentage points
-Profitable-market ratio: 54.55%
-Very-low-price markets: 4 / 11
-Late low-price markets: 1 / 11
-BUY-only profit proxy:  ~$55,209.96
-BUY volume:             ~$27,208.73
-```
-
-This wallet is especially notable for repeated very-low-price winning activity across four markets.
-
-It also generated several of the strongest individual late low-price winning BUY examples in the detailed candidate extraction.
-
----
-
-### 12.4 Rank 5 — `0xc9db6c95...`
-
-Observed characteristics:
-
-```text
-Candidate score:        67.15 / 100
-Markets:                6
-BUY trades:             579
-Hit rate:               92.23%
-Edge vs baseline:       +33.89 percentage points
-Profitable-market ratio: 66.67%
-Very-low-price markets: 2 / 6
-Late low-price markets: 1 / 6
-BUY-only profit proxy:  ~$1,165.20
-BUY volume:             ~$664.25
-```
-
-The wallet's extremely high hit rate is notable, but its economic size is small.
-
-This illustrates why the final score combines multiple features rather than ranking purely by hit rate.
-
----
-
-### 12.5 Rank 7 — `0x8f42ae0a...`
-
-Observed characteristics:
-
-```text
-Candidate score:        64.31 / 100
-Reliability:            80%
-Markets:                7
-BUY trades:             60
-Hit rate:               88.33%
-Edge vs baseline:       +30.00 percentage points
-Profitable-market ratio: 85.71%
-Very-low-price markets: 3 / 7
-Late low-price markets: 1 / 7
-BUY-only profit proxy:  ~$191,294.58
-BUY volume:             ~$377,026.59
-```
-
-This wallet combines a strong hit rate with substantial economic exposure.
-
-Its reliability adjustment is below 100% because the number of BUY observations is smaller than for several other top candidates.
-
----
-
-## 13. Trade-Level Candidate Evidence
-
-The detailed extraction for the top ten candidates produced:
-
-```text
-711 interesting low-price winning BUY trades
-```
-
-The number of selected trades by candidate was:
-
-| Rank | Wallet | Interesting Trades |
-|---:|---|---:|
-| 1 | `0xcf6a714618a328c608a1c70cb62a31a6bef3f9d0` | 43 |
-| 2 | `0x10b289276b2b69cac7b1bbc58601009b6ee74ceb` | 53 |
-| 3 | `0xad529df14c293d77984a0137990a1441b25211ac` | 63 |
-| 4 | `0xd6639bff2beb2bcc0cfedc27e0f7980964e1ca64` | 31 |
-| 5 | `0xc9db6c957b2ba169608907443f3991b8d01b2ad3` | 282 |
-| 6 | `0xdde1a0257ddcc19522df5128049ce5619944f1d7` | 18 |
-| 7 | `0x8f42ae0a01c0383c7ca8bd060b86a645ee74b88f` | 13 |
-| 8 | `0xb22326c1770aa89dfb2b372137e570a360433772` | 120 |
-| 9 | `0x86ce8bf4ea6334796156e558642f83f4df0d8af5` | 18 |
-| 10 | `0xbb39ba863319281427a482c8714ffdf69cb7ee8a` | 70 |
-
-### Notable market cluster
-
-Many of the strongest timing examples in the top-30 trade-level output were concentrated in the market:
-
-**US strikes Iran by February 28, 2026?**
-
-This concentration is important.
-
-It demonstrates why trade-level examples should not be interpreted as independent evidence when they arise from the same underlying event.
-
-The main ranking partially mitigates this problem through wallet + market aggregation.
-
-However, multiple wallets reacting to the same event can still produce correlated observations.
-
----
-
-### Example 1 — Rank 7 candidate
-
-Wallet:
-
-```text
-0x8f42ae0a01c0383c7ca8bd060b86a645ee74b88f
-```
-
-Market:
-
-```text
-US strikes Iran by February 28, 2026?
-```
-
-Trade:
-
-```text
-Outcome:                  Yes
-Price:                    ~0.1548
-Hours before close:       ~15.86
-BUY volume:               ~$4,025.96
-BUY-only profit proxy:    ~$21,974.04
-Very-low-price signal:    Yes
-Late low-price signal:    Yes
-```
-
-This trade combines:
-
-- a relatively low entry price
-- the eventual winning outcome
-- meaningful size
-- proximity to market closure
-
-It is therefore a strong example of the type of trade the screening framework is designed to surface.
-
-It does not establish whether the trader acted on public or non-public information.
-
----
-
-### Example 2 — Rank 1 candidate
+### Highest-ranked candidate
 
 Wallet:
 
@@ -936,274 +439,95 @@ Wallet:
 0xcf6a714618a328c608a1c70cb62a31a6bef3f9d0
 ```
 
-Market:
+Summary:
 
 ```text
-US strikes Iran by February 28, 2026?
+Candidate score:          76.10 / 100
+Signal level:             VERY HIGH
+Reliability:              100%
+Markets:                  8
+Predictive BUY trades:    155
+Hit rate:                 85.16%
+Global baseline:          59.36%
+Edge vs baseline:         +25.81 percentage points
+Profitable-market ratio:  62.5%
+Very-low-price markets:   3 / 8
+Late low-price markets:   1 / 8
+BUY-only profit proxy:    ~$78,919.51
+BUY volume:               ~$108,422.21
 ```
 
-Trade:
+The wallet ranks highly because several different behavioral signals occur together.
 
-```text
-Outcome:                  Yes
-Price:                    0.08
-Hours before close:       ~23.44
-BUY volume:               ~$240.00
-BUY-only profit proxy:    ~$2,760.00
-Very-low-price signal:    Yes
-Late low-price signal:    Yes
-```
-
-This entry occurred at a price that implied a much lower market probability than the eventual outcome.
-
-The timing also falls inside the final 24 hours before recorded closure.
+This does not establish access to non-public information.
 
 ---
 
-### Example 3 — Rank 3 candidate
+## 11. Candidate-Level Trade Evidence
 
-Wallet:
+`src/candidate_details.py` extracts low-price winning BUY examples for the top ten candidates.
 
-```text
-0xad529df14c293d77984a0137990a1441b25211ac
-```
-
-Market:
+The final rerun produced:
 
 ```text
-US strikes Iran by February 28, 2026?
+613 interesting trades
 ```
 
-One notable trade:
+Candidate examples are restricted to valid **pre-close** observations.
+
+A trade is not included when:
 
 ```text
-Outcome:                  Yes
-Price:                    0.17
-Hours before close:       ~12.35
-BUY volume:               ~$566.61
-BUY-only profit proxy:    ~$2,766.39
-Very-low-price signal:    Yes
-Late low-price signal:    Yes
+hours_before_close is missing
+or
+hours_before_close < 0
 ```
 
-The same wallet also executed several additional winning entries in the same market near prices around `0.08` to `0.18`.
+This keeps candidate examples aligned with the same anti-leakage rule used by predictive metrics.
 
-This illustrates why repeated fills on one market should not be treated as independent predictions.
-
----
-
-## 14. Why Some Apparently Strong Wallets Rank Lower
-
-The reliability adjustment materially changes the ranking.
-
-For example, wallet:
+The resulting artifact is:
 
 ```text
-0x6a8328b1ae11569f7b27600073558879885e4c59
+results/candidate_details.csv
 ```
 
-showed:
-
-```text
-4 markets
-46 BUY trades
-97.83% hit rate
-+39.49 percentage-point edge
-4 / 4 very-low-price win markets
-100% profitable-market ratio
-~$118,962.79 BUY-only profit proxy
-```
-
-Despite these strong raw metrics, it ranked only:
-
-```text
-29th
-```
-
-with a final score of:
-
-```text
-57.14
-```
-
-because its reliability factor was only:
-
-```text
-63.27%
-```
-
-This demonstrates the purpose of the reliability adjustment.
-
-A highly concentrated but small sample should not automatically dominate a broader evidence base.
+The examples should be interpreted as leads for event-specific follow-up, not proof of informed trading.
 
 ---
 
-## 15. Interpretation of High Scores
+## 12. Interpretation of High Scores
 
-Several alternative explanations may produce behavior that resembles informed trading.
+A high-scoring wallet may have several alternative explanations, including:
 
-A high-scoring wallet may represent:
+- specialized domain expertise
+- quantitative trading
+- rapid reaction to public information
+- automation
+- market-making behavior
+- systematic exploitation of pricing inefficiencies
+- portfolio strategies not reconstructed by this analysis
 
-- a sophisticated quantitative trader
-- a specialized domain expert
-- an automated strategy
-- a market maker
-- a trader reacting rapidly to public information
-- a wallet executing a broader portfolio strategy
-- multiple users sharing infrastructure
-- a trader specializing in a narrow event category
-- an account systematically exploiting pricing inefficiencies
+A high score means the wallet's public trading behavior is unusually consistent with the selected screening heuristics.
 
-Therefore, the ranking is best viewed as a triage mechanism.
-
-A high candidate score means:
-
-> the wallet's public trading behavior is unusually consistent with the selected screening heuristics.
-
-It does not determine why the behavior occurred.
+It does not explain why the pattern occurred.
 
 ---
 
-## 16. Important Limitations
+## 13. Important Limitations
 
-### 16.1 Scoped market universe
+### Scoped market universe
 
-The final universe contains only the 20 highest-volume closed markets selected under the date filter.
+The final universe contains only 20 selected high-volume closed markets, and only 18 contain in-window trades.
 
-Only 18 of those markets contain in-window trades.
+### Public data only
 
-This prioritizes liquid markets but may miss unusual behavior in smaller markets.
+The project cannot determine what information a trader possessed, when they acquired it, or whether it was public.
 
----
+### `closed_time` is only a proxy
 
-### 16.2 Public data only
+Recorded market close is not necessarily the first public disclosure timestamp for the underlying event.
 
-The analysis uses only public Polymarket data.
-
-It cannot determine:
-
-- what information a trader possessed
-- when the trader acquired that information
-- whether the information was public
-- why the trade was placed
-
----
-
-### 16.3 `closed_time` is only a proxy
-
-The project does not reconstruct the exact timeline of public information for every event.
-
-A trade occurring a few hours before recorded market closure may still have occurred after decisive information had already become public.
-
-A stronger event-level investigation would compare:
-
-```text
-trade timestamp
-```
-
-with:
-
-```text
-first public disclosure timestamp
-```
-
-using event-specific sources.
-
----
-
-### 16.4 Profit proxy is not realized P&L
-
-The BUY-only hold-to-resolution metric ignores SELL activity and complete position management.
-
-Actual behavior may include:
-
-- partial exits
-- full exits
-- hedges
-- opposite-side trades
-- cross-market hedging
-- inventory management
-
-The metric is therefore a standardized heuristic rather than an accounting result.
-
----
-
-### 16.5 Wallets do not equal individuals
-
-No identity attribution is attempted.
-
-A wallet can represent:
-
-- one individual
-- multiple individuals
-- a trading firm
-- an automated strategy
-- a bot
-- an execution service
-
----
-
-### 16.6 Correlated markets and events
-
-Different prediction markets can refer to the same underlying real-world event.
-
-A trader positioned correctly across several related markets may be expressing one underlying thesis rather than repeatedly obtaining independent informational advantages.
-
-Likewise, several wallets may react to the same information event.
-
-This is an important limitation for future refinement.
-
----
-
-### 16.7 Market price is only an approximate probability signal
-
-Prediction-market prices can be interpreted approximately as probabilities, but they are also affected by:
-
-- liquidity
-- spread
-- order-book imbalance
-- temporary dislocations
-- market-maker behavior
-- execution effects
-
-A price of `0.20` should therefore not be treated as a perfectly calibrated 20% probability.
-
----
-
-### 16.8 Reliability factor is heuristic
-
-The reliability adjustment reduces the influence of very small samples.
-
-It is not a formal significance test.
-
-The current ranking should therefore be interpreted as explainable candidate prioritization rather than statistical proof.
-
----
-
-## 17. Potential Improvements
-
-Several extensions could strengthen the methodology.
-
-### Event clustering
-
-Markets referring to the same underlying event could be clustered.
-
-This would avoid treating correlated markets as fully independent evidence.
-
-### Public-information timelines
-
-For the strongest candidates, the analysis could reconstruct exact timelines using:
-
-- official announcements
-- news publications
-- regulatory releases
-- project social-media posts
-- government statements
-- election reporting
-- sports results
-- blockchain events
-
-The strongest follow-up comparison would be:
+A stronger follow-up investigation would compare:
 
 ```text
 trade timestamp
@@ -1211,45 +535,47 @@ vs.
 first verified public disclosure timestamp
 ```
 
-### Position reconstruction
+### Profit proxy is not realized P&L
 
-BUY and SELL trades could be combined into wallet-level positions over time.
+The BUY-only proxy does not reconstruct SELLs or complete wallet positions.
 
-This would support more realistic:
+### Wallets do not equal individuals
 
-- realized P&L
-- mark-to-market P&L
-- position exposure
-- net outcome exposure
+A wallet can represent an individual, bot, firm, shared service, or automated strategy.
 
-### Wallet clustering
+### Correlated markets and events
 
-Funding flows and related wallet behavior could be analyzed to detect whether several wallets may belong to one actor or coordinated strategy.
+Multiple markets can represent related versions of the same real-world event, so cross-market observations are not always statistically independent.
 
-### Statistical testing
+### Price is only an approximate probability signal
 
-Observed outcomes could be tested against:
+Liquidity, spread, order-book effects, and temporary dislocations can influence market prices.
 
-- market-implied probabilities
-- matched control wallets
-- peer traders in the same market category
-- simulated random strategies
+### Reliability factor is heuristic
 
-This would allow estimation of how unusual the observed performance is under explicit null models.
-
-### Category controls
-
-Wallets could be compared against peers who trade similar market categories.
-
-This would help distinguish specialized expertise from broadly unusual performance.
+The reliability adjustment is not a formal significance test.
 
 ---
 
-## 18. Reproducibility
+## 14. Potential Improvements
 
-The main pipeline is implemented in Python.
+Future work could strengthen the analysis through:
 
-The current execution order is:
+- event clustering
+- exact public-information timelines
+- BUY/SELL position reconstruction
+- realized and mark-to-market P&L
+- wallet clustering
+- funding-flow analysis
+- matched control wallets
+- statistical significance testing
+- category-specific peer baselines
+
+---
+
+## 15. Reproducibility
+
+Execution order:
 
 ```text
 src/market_dates.py
@@ -1263,62 +589,63 @@ src/insider_score.py
 src/candidate_details.py
 ```
 
-The main analytical outputs are:
+Validation:
+
+```text
+python -m compileall src checks
+```
+
+### Committed compact artifacts
+
+```text
+data/raw/market_dates.csv
+data/processed/market_outcomes.csv
+results/insider_ranking_top100.csv
+results/candidate_details.csv
+report/report.md
+```
+
+### Generated full analytical outputs
 
 ```text
 results/trader_accuracy.csv
 results/trader_edge.csv
 results/trader_market_signals.csv
 results/insider_ranking.csv
-results/candidate_details.csv
 ```
 
-The fixed market universe is stored in:
+These complete result tables are intentionally excluded from version control because of their size.
 
-```text
-data/raw/market_dates.csv
-```
-
-and final market outcomes are stored in:
-
-```text
-data/processed/market_outcomes.csv
-```
-
-Large trade-level files are excluded from Git because of their size.
-
-The main ignored generated files are:
+### Generated large trade-level datasets
 
 ```text
 data/raw/trades.csv
 data/processed/trades_with_outcome.csv
-data/processed/trades_with_timing.csv
 ```
 
-`trades_with_timing.csv` is deprecated and is not part of the current pipeline.
-
-The active datasets can be regenerated through the documented scripts.
+These are also excluded from Git and can be regenerated from the documented public sources.
 
 ---
 
-## 19. Conclusion
+## 16. Conclusion
 
-The project produced a reproducible screening framework for identifying Polymarket wallets whose behavior is unusually consistent with selected heuristics for potentially informed trading.
+The final project provides a reproducible screening framework for identifying Polymarket wallets whose public behavior is unusually consistent with selected heuristics for potentially informed trading.
 
 The final scoped dataset contains:
 
 ```text
 20 selected markets
 18 markets with in-window trades
-1,187,786 in-window trades
-794,187 BUY trades
-207,119 BUY wallets
+1,253,275 in-window trades
+826,167 predictive BUY trades
+490,382 winning predictive BUY trades
+214,824 predictive BUY wallets
 ```
 
-The global BUY outcome hit-rate baseline is:
+The global predictive BUY baseline is:
 
 ```text
-58.33%
+59.36%
 ```
 
 The highest-ranked wallet received:
@@ -1327,35 +654,14 @@ The highest-ranked wallet received:
 76.10 / 100
 ```
 
-with a:
+with a `VERY HIGH` heuristic signal level.
+
+The candidate-level extraction produced:
 
 ```text
-VERY HIGH
+613 pre-close interesting trades
 ```
 
-heuristic signal level.
+across the top ten candidates.
 
-The strongest candidate patterns combine several features:
-
-- successful low-price entries
-- successful very-low-price entries
-- positive hit-rate edge relative to the global baseline
-- repetition across multiple markets
-- late successful positioning
-- positive BUY-only hold-to-resolution payoff proxy
-- meaningful activity volume
-- sufficient sample reliability
-
-The trade-level candidate extraction produced:
-
-```text
-711
-```
-
-interesting low-price winning BUYs across the top ten candidates.
-
-The ranking should therefore be used as a:
-
-**candidate-generation and prioritization tool for further investigation**
-
-rather than as evidence that any specific wallet possessed material non-public information or engaged in unlawful activity.
+The ranking should be used as a **candidate-generation and prioritization tool for further investigation**, not as evidence that a specific wallet possessed material non-public information or engaged in unlawful conduct.

@@ -35,6 +35,9 @@ MIN_MARKETS = 3
 # 1. Aggregate wallet + market
 # --------------------------------------------------
 
+post_close_buy_excluded = 0
+missing_timing_buy_excluded = 0
+
 trader_markets = defaultdict(
     lambda: {
         "buy_count": 0,
@@ -147,22 +150,31 @@ with open(
             "",
         )
 
-        hours = None
-
-        if hours_raw not in (
+        # Keep post-close rows in the enriched input for
+        # diagnostics, but exclude them from predictive
+        # wallet-market aggregates to prevent outcome leakage.
+        if hours_raw in (
             "",
             None,
         ):
-            try:
-                hours = float(
-                    hours_raw
-                )
+            missing_timing_buy_excluded += 1
+            continue
 
-            except (
-                ValueError,
-                TypeError,
-            ):
-                hours = None
+        try:
+            hours = float(
+                hours_raw
+            )
+
+        except (
+            ValueError,
+            TypeError,
+        ):
+            missing_timing_buy_excluded += 1
+            continue
+
+        if hours < 0:
+            post_close_buy_excluded += 1
+            continue
 
         key = (
             wallet,
@@ -736,6 +748,16 @@ print(
 print(
     "Wallet-market combinations:",
     len(trader_markets),
+)
+
+print(
+    "Post-close BUY excluded from predictive aggregates:",
+    post_close_buy_excluded,
+)
+
+print(
+    "BUY with missing/invalid timing excluded:",
+    missing_timing_buy_excluded,
 )
 
 print(

@@ -147,7 +147,7 @@ def get_json(url, params=None):
 
 def load_markets():
     """
-    Read the fixed 1,000-market universe from market_dates.csv.
+    Read the fixed scoped market universe from market_dates.csv.
     """
 
     markets = []

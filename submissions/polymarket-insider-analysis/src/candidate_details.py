@@ -252,12 +252,14 @@ with open(
             ):
                 hours_before_close = None
 
-        # A negative value means trade timestamp
-        # was after recorded closed_time.
-        trade_after_close = (
-            hours_before_close is not None
-            and hours_before_close < 0
-        )
+        # Candidate investigation examples must be
+        # pre-close observations. Post-close trades remain
+        # available in the enriched dataset for diagnostics.
+        if (
+            hours_before_close is None
+            or hours_before_close < 0
+        ):
+            continue
 
         very_low_price = (
             price
@@ -380,9 +382,6 @@ with open(
 
                 "late_low_price":
                     late_low_price,
-
-                "trade_after_close":
-                    trade_after_close,
 
                 "transaction_hash":
                     trade.get(

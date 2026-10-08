@@ -1,21 +1,55 @@
+from pathlib import Path
 import csv
 
-trades = []
 
-with open("data/raw/trades.csv", "r", encoding="utf-8") as file:
-    reader = csv.DictReader(file)
+BASE_DIR = Path(__file__).resolve().parents[1]
 
-    for row in reader:
-        trades.append(row)
+TRADES_FILE = (
+    BASE_DIR
+    / "data"
+    / "raw"
+    / "trades.csv"
+)
 
-print("Всего сделок:", len(trades))
 
-wallets = set()
-markets = set()
+def main():
+    trades = []
 
-for trade in trades:
-    wallets.add(trade["proxy_wallet"])
-    markets.add(trade["condition_id"])
+    with open(
+        TRADES_FILE,
+        "r",
+        encoding="utf-8",
+    ) as file:
+        reader = csv.DictReader(file)
 
-print("Уникальных трейдеров:", len(wallets))
-print("Уникальных рынков:", len(markets))
+        for row in reader:
+            trades.append(row)
+
+    print("Всего сделок:", len(trades))
+
+    wallets = set()
+    markets = set()
+
+    for trade in trades:
+        wallet = trade.get(
+            "proxy_wallet",
+            "",
+        ).strip()
+
+        condition_id = trade.get(
+            "condition_id",
+            "",
+        ).strip()
+
+        if wallet:
+            wallets.add(wallet)
+
+        if condition_id:
+            markets.add(condition_id)
+
+    print("Уникальных трейдеров:", len(wallets))
+    print("Уникальных рынков:", len(markets))
+
+
+if __name__ == "__main__":
+    main()

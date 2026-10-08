@@ -80,7 +80,7 @@ def collect_markets():
     - scheduled end date:
       2025-11-01 <= end_date < 2026-05-01
     - ordered by trading volume descending
-    - first 1,000 unique markets
+    - first 20 unique markets with valid date ranges
 
     The Polymarket SDK handles keyset pagination.
     """
@@ -129,11 +129,22 @@ def collect_markets():
                 if condition_id in seen_condition_ids:
                     continue
 
+                start_date = (
+                    market.state.start_date
+                )
+
                 end_date = (
                     market.state.end_date
                 )
 
-                if end_date is None:
+                # Reject markets with missing or invalid
+                # temporal boundaries. The analysis requires
+                # a real interval where start_date < end_date.
+                if (
+                    start_date is None
+                    or end_date is None
+                    or start_date >= end_date
+                ):
                     continue
 
                 # Local validation of analysis period
@@ -152,7 +163,8 @@ def collect_markets():
                     market
                 )
 
-                # Stop as soon as the scoped sample reaches 1,000.
+                # Stop as soon as the scoped sample reaches
+                # the configured target size.
                 if (
                     len(selected_markets)
                     >= TARGET_MARKETS

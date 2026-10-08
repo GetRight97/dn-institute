@@ -44,6 +44,9 @@ traders = defaultdict(
 total_buy_count = 0
 total_winning_buy_count = 0
 
+post_close_buy_excluded = 0
+missing_timing_buy_excluded = 0
+
 
 with open(
     INPUT_FILE,
@@ -122,6 +125,31 @@ with open(
             )
         )
 
+        # Predictive metrics must use only observations made
+        # before or at the recorded market close.
+        if hours_before_close in (
+            "",
+            None,
+        ):
+            missing_timing_buy_excluded += 1
+            continue
+
+        try:
+            hours = float(
+                hours_before_close
+            )
+
+        except (
+            ValueError,
+            TypeError,
+        ):
+            missing_timing_buy_excluded += 1
+            continue
+
+        if hours < 0:
+            post_close_buy_excluded += 1
+            continue
+
         stats = traders[
             wallet
         ]
@@ -167,37 +195,21 @@ with open(
 
             total_winning_buy_count += 1
 
-        if hours_before_close not in (
-            "",
-            None,
+        if (
+            0
+            <= hours
+            <= LATE_HOURS
         ):
-            try:
-                hours = float(
-                    hours_before_close
-                )
 
-            except (
-                ValueError,
-                TypeError,
-            ):
-                hours = None
+            stats[
+                "late_buy_count"
+            ] += 1
 
-            if (
-                hours is not None
-                and 0
-                <= hours
-                <= LATE_HOURS
-            ):
+            if is_winning_buy:
 
                 stats[
-                    "late_buy_count"
+                    "late_winning_buy_count"
                 ] += 1
-
-                if is_winning_buy:
-
-                    stats[
-                        "late_winning_buy_count"
-                    ] += 1
 
 
 baseline_hit_rate = (
@@ -387,6 +399,16 @@ print(
 print(
     "Unique BUY wallets:",
     len(results),
+)
+
+print(
+    "Post-close BUY excluded from predictive metrics:",
+    post_close_buy_excluded,
+)
+
+print(
+    "BUY with missing/invalid timing excluded:",
+    missing_timing_buy_excluded,
 )
 
 
@@ -582,6 +604,16 @@ print(
 print(
     "Unique BUY wallets:",
     len(results),
+)
+
+print(
+    "Post-close BUY excluded from predictive metrics:",
+    post_close_buy_excluded,
+)
+
+print(
+    "BUY with missing/invalid timing excluded:",
+    missing_timing_buy_excluded,
 )
 
 print(
