@@ -19,16 +19,16 @@ PROCESSED_DIR.mkdir(
 MARKETS_FILE = RAW_DIR / "market_dates.csv"
 OUTPUT_FILE = PROCESSED_DIR / "market_outcomes.csv"
 
+EXPECTED_MARKETS = 20
 MAX_RETRIES = 5
 
 
 def load_condition_ids():
     """
-    Read the fixed market universe from market_dates.csv.
+    Read and validate the fixed market universe.
 
-    This ensures market metadata is collected for all markets
-    selected by market_dates.py, including markets that had
-    zero trades during the analysis period.
+    Downstream analysis is defined for exactly 20 selected
+    markets, so a smaller or larger input is rejected.
     """
 
     condition_ids = []
@@ -52,16 +52,17 @@ def load_condition_ids():
                     condition_id
                 )
 
-    # Remove duplicates while preserving order
     condition_ids = list(
         dict.fromkeys(
             condition_ids
         )
     )
 
-    if not condition_ids:
+    if len(condition_ids) != EXPECTED_MARKETS:
         raise RuntimeError(
-            "market_dates.csv contains no condition IDs."
+            "Invalid fixed market universe: "
+            f"expected exactly {EXPECTED_MARKETS} unique "
+            f"condition IDs, found {len(condition_ids)}."
         )
 
     print(
@@ -76,12 +77,7 @@ def fetch_market(
     client,
     condition_id,
 ):
-    """
-    Fetch one historical market.
-
-    Transient API/SDK errors are retried.
-    A failed lookup is never silently ignored.
-    """
+    """Fetch one historical market with retries."""
 
     last_error = None
 
@@ -102,7 +98,7 @@ def fetch_market(
 
             if not page.items:
                 raise RuntimeError(
-                    f"No market returned for "
+                    "No market returned for "
                     f"condition_id={condition_id}"
                 )
 
@@ -110,7 +106,9 @@ def fetch_market(
                 (
                     item
                     for item in page.items
-                    if str(item.condition_id)
+                    if str(
+                        item.condition_id
+                    )
                     == condition_id
                 ),
                 None,
@@ -146,7 +144,7 @@ def fetch_market(
             )
 
     raise RuntimeError(
-        f"Failed to fetch market "
+        "Failed to fetch market "
         f"{condition_id} after "
         f"{MAX_RETRIES} attempts"
     ) from last_error
@@ -156,10 +154,9 @@ def collect_markets(
     condition_ids,
 ):
     """
-    Retrieve metadata for every market
-    in the fixed universe.
+    Retrieve metadata for every market in the fixed universe.
 
-    The pipeline fails if even one lookup fails.
+    Any lookup failure aborts downstream enrichment.
     """
 
     found_markets = {}
@@ -205,31 +202,17 @@ def collect_markets(
             )
 
     if failed_ids:
-        print()
-        print(
-            "Failed market lookups:"
-        )
-
-        for condition_id in failed_ids:
-            print(
-                condition_id
-            )
-
         raise RuntimeError(
-            f"{len(failed_ids)} market lookup(s) "
-            f"failed. market_outcomes.csv was not "
-            f"created because downstream analysis "
-            f"would be incomplete."
+            f"{len(failed_ids)} market lookup(s) failed. "
+            "market_outcomes.csv was not created because "
+            "downstream analysis would be incomplete."
         )
 
-    if len(found_markets) != len(
-        condition_ids
-    ):
+    if len(found_markets) != EXPECTED_MARKETS:
         raise RuntimeError(
             "Market coverage check failed: "
-            f"{len(found_markets)} found "
-            f"for {len(condition_ids)} "
-            f"condition IDs."
+            f"expected {EXPECTED_MARKETS}, "
+            f"found {len(found_markets)}."
         )
 
     return found_markets
@@ -241,37 +224,36 @@ def determine_winner(
     """
     Determine the winning binary outcome.
 
-    A winner is accepted only when:
-    - market is closed
-    - both final outcome prices are available
-    - final prices are exactly 1.0 / 0.0
-
-    UMA status is retained as metadata but is not
-    required because not every Polymarket market
-    type necessarily exposes the same UMA status.
+    A winner is accepted only when the market is closed and
+    final prices are exactly 1.0 / 0.0.
     """
 
+    state = getattr(
+        market,
+        "state",
+        None,
+    )
+
+    if state is None:
+        raise RuntimeError(
+            f"Market {market.condition_id} has no state object."
+        )
+
     closed = bool(
-        market.state.closed
+        state.closed
     )
 
     yes_outcome = market.outcomes.yes
     no_outcome = market.outcomes.no
 
-    yes_label = (
-        yes_outcome.label
-    )
-
-    no_label = (
-        no_outcome.label
-    )
+    yes_label = yes_outcome.label
+    no_label = no_outcome.label
 
     yes_price = (
         float(
             yes_outcome.price
         )
-        if yes_outcome.price
-        is not None
+        if yes_outcome.price is not None
         else None
     )
 
@@ -279,15 +261,13 @@ def determine_winner(
         float(
             no_outcome.price
         )
-        if no_outcome.price
-        is not None
+        if no_outcome.price is not None
         else None
     )
 
     uma_status = ""
 
     if market.resolution is not None:
-
         status = (
             market.resolution
             .uma_resolution_status
@@ -308,50 +288,168 @@ def determine_winner(
         and yes_price is not None
         and no_price is not None
     ):
-
         if (
             yes_price == 1.0
             and no_price == 0.0
         ):
-            winning_outcome = (
-                yes_label
-            )
+            winning_outcome = yes_label
 
         elif (
             no_price == 1.0
             and yes_price == 0.0
         ):
-            winning_outcome = (
-                no_label
-            )
-
-    is_resolved = bool(
-        winning_outcome
-    )
+            winning_outcome = no_label
 
     return {
+        "closed": closed,
         "yes_label": yes_label,
         "no_label": no_label,
         "yes_price": yes_price,
         "no_price": no_price,
         "uma_status": uma_status,
-        "is_resolved": is_resolved,
+        "is_resolved": bool(
+            winning_outcome
+        ),
         "winning_outcome": (
             winning_outcome
         ),
     }
 
 
-def write_market_outcomes(
+def build_rows(
     found_markets,
 ):
     """
-    Write complete metadata for the fixed market universe.
+    Build all outcome rows in memory and validate resolution
+    before any output file is written.
     """
 
-    winner_count = 0
-    closed_time_count = 0
-    resolved_count = 0
+    rows = []
+    unresolved_ids = []
+
+    for (
+        condition_id,
+        market,
+    ) in found_markets.items():
+
+        state = getattr(
+            market,
+            "state",
+            None,
+        )
+
+        if state is None:
+            unresolved_ids.append(
+                condition_id
+            )
+            continue
+
+        closed_time = getattr(
+            state,
+            "closed_time",
+            None,
+        )
+
+        end_date = getattr(
+            state,
+            "end_date",
+            None,
+        )
+
+        result = determine_winner(
+            market
+        )
+
+        if not result[
+            "is_resolved"
+        ]:
+            unresolved_ids.append(
+                condition_id
+            )
+
+        rows.append(
+            {
+                "condition_id":
+                    condition_id,
+                "title":
+                    market.question or "",
+                "closed":
+                    result["closed"],
+                "closed_time":
+                    (
+                        closed_time.isoformat()
+                        if closed_time is not None
+                        else ""
+                    ),
+                "end_date":
+                    (
+                        end_date.isoformat()
+                        if end_date is not None
+                        else ""
+                    ),
+                "outcomes":
+                    json.dumps(
+                        [
+                            result["yes_label"],
+                            result["no_label"],
+                        ],
+                        ensure_ascii=False,
+                    ),
+                "outcome_prices":
+                    json.dumps(
+                        [
+                            result["yes_price"],
+                            result["no_price"],
+                        ],
+                        ensure_ascii=False,
+                    ),
+                "winning_outcome":
+                    result[
+                        "winning_outcome"
+                    ],
+                "uma_status":
+                    result[
+                        "uma_status"
+                    ],
+            }
+        )
+
+    if unresolved_ids:
+        raise RuntimeError(
+            "Outcome enrichment incomplete: "
+            f"{len(unresolved_ids)} selected market(s) "
+            "are unresolved or have no identifiable winner: "
+            + ", ".join(
+                unresolved_ids
+            )
+        )
+
+    if len(rows) != EXPECTED_MARKETS:
+        raise RuntimeError(
+            "Outcome row-count validation failed: "
+            f"expected {EXPECTED_MARKETS}, "
+            f"built {len(rows)}."
+        )
+
+    return rows
+
+
+def write_market_outcomes(
+    rows,
+):
+    """Write only a fully validated outcome dataset."""
+
+    fieldnames = [
+        "condition_id",
+        "title",
+        "closed",
+        "closed_time",
+        "end_date",
+        "outcomes",
+        "outcome_prices",
+        "winning_outcome",
+        "uma_status",
+    ]
 
     with open(
         OUTPUT_FILE,
@@ -360,151 +458,42 @@ def write_market_outcomes(
         encoding="utf-8",
     ) as output_file:
 
-        fieldnames = [
-            "condition_id",
-            "title",
-            "closed",
-            "closed_time",
-            "end_date",
-            "outcomes",
-            "outcome_prices",
-            "winning_outcome",
-            "uma_status",
-        ]
-
         writer = csv.DictWriter(
             output_file,
             fieldnames=fieldnames,
         )
 
         writer.writeheader()
-
-        for (
-            condition_id,
-            market,
-        ) in found_markets.items():
-
-            title = (
-                market.question
-                or ""
-            )
-
-            closed = bool(
-                market.state.closed
-            )
-
-            closed_time = (
-                market.state.closed_time
-            )
-
-            end_date = (
-                market.state.end_date
-            )
-
-            if closed_time is not None:
-                closed_time_count += 1
-
-                closed_time_value = (
-                    closed_time.isoformat()
-                )
-
-            else:
-                closed_time_value = ""
-
-            if end_date is not None:
-                end_date_value = (
-                    end_date.isoformat()
-                )
-
-            else:
-                end_date_value = ""
-
-            result = determine_winner(
-                market
-            )
-
-            outcomes = [
-                result["yes_label"],
-                result["no_label"],
-            ]
-
-            outcome_prices = [
-                result["yes_price"],
-                result["no_price"],
-            ]
-
-            if result[
-                "is_resolved"
-            ]:
-                resolved_count += 1
-
-            if result[
-                "winning_outcome"
-            ]:
-                winner_count += 1
-
-            writer.writerow(
-                {
-                    "condition_id": (
-                        condition_id
-                    ),
-                    "title": title,
-                    "closed": closed,
-                    "closed_time": (
-                        closed_time_value
-                    ),
-                    "end_date": (
-                        end_date_value
-                    ),
-                    "outcomes": (
-                        json.dumps(
-                            outcomes,
-                            ensure_ascii=False,
-                        )
-                    ),
-                    "outcome_prices": (
-                        json.dumps(
-                            outcome_prices,
-                            ensure_ascii=False,
-                        )
-                    ),
-                    "winning_outcome": (
-                        result[
-                            "winning_outcome"
-                        ]
-                    ),
-                    "uma_status": (
-                        result[
-                            "uma_status"
-                        ]
-                    ),
-                }
-            )
-
-    return (
-        closed_time_count,
-        resolved_count,
-        winner_count,
-    )
+        writer.writerows(
+            rows
+        )
 
 
 def main():
-    condition_ids = (
-        load_condition_ids()
+    condition_ids = load_condition_ids()
+
+    found_markets = collect_markets(
+        condition_ids
     )
 
-    found_markets = (
-        collect_markets(
-            condition_ids
-        )
-    )
-
-    (
-        closed_time_count,
-        resolved_count,
-        winner_count,
-    ) = write_market_outcomes(
+    rows = build_rows(
         found_markets
+    )
+
+    write_market_outcomes(
+        rows
+    )
+
+    closed_time_count = sum(
+        1
+        for row in rows
+        if row["closed_time"]
+    )
+
+    resolved_count = sum(
+        1
+        for row in rows
+        if row["winning_outcome"]
     )
 
     print()
@@ -538,7 +527,7 @@ def main():
 
     print(
         "Markets with identified winner:",
-        winner_count,
+        resolved_count,
     )
 
     print()

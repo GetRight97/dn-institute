@@ -33,9 +33,7 @@ TARGET_MARKETS = 20
 
 
 def get_volume(market):
-    """
-    Read numeric market volume from the SDK MarketMetrics object.
-    """
+    """Read numeric market volume from SDK market metrics."""
 
     metrics = getattr(
         market,
@@ -74,15 +72,17 @@ def get_volume(market):
 
 def collect_markets():
     """
-    Dataset scope:
+    Select exactly TARGET_MARKETS valid markets.
 
+    Scope:
     - closed Polymarket markets
-    - scheduled end date:
-      2025-11-01 <= end_date < 2026-05-01
-    - ordered by trading volume descending
-    - first 20 unique markets with valid date ranges
+    - 2025-11-01 <= scheduled end_date < 2026-05-01
+    - ordered by volume descending
+    - unique condition IDs
+    - valid temporal range: start_date < end_date
 
-    The Polymarket SDK handles keyset pagination.
+    The function fails explicitly if pagination is exhausted
+    before the target market count is reached.
     """
 
     selected_markets = []
@@ -125,21 +125,30 @@ def collect_markets():
                     condition_id
                 )
 
-                # Avoid duplicate markets
                 if condition_id in seen_condition_ids:
                     continue
 
-                start_date = (
-                    market.state.start_date
+                state = getattr(
+                    market,
+                    "state",
+                    None,
                 )
 
-                end_date = (
-                    market.state.end_date
+                if state is None:
+                    continue
+
+                start_date = getattr(
+                    state,
+                    "start_date",
+                    None,
                 )
 
-                # Reject markets with missing or invalid
-                # temporal boundaries. The analysis requires
-                # a real interval where start_date < end_date.
+                end_date = getattr(
+                    state,
+                    "end_date",
+                    None,
+                )
+
                 if (
                     start_date is None
                     or end_date is None
@@ -147,7 +156,6 @@ def collect_markets():
                 ):
                     continue
 
-                # Local validation of analysis period
                 if not (
                     START_DATE
                     <= end_date
@@ -163,22 +171,28 @@ def collect_markets():
                     market
                 )
 
-                # Stop as soon as the scoped sample reaches
-                # the configured target size.
                 if (
                     len(selected_markets)
-                    >= TARGET_MARKETS
+                    == TARGET_MARKETS
                 ):
                     return selected_markets
 
-    return selected_markets
+    raise RuntimeError(
+        "Market selection incomplete: "
+        f"expected exactly {TARGET_MARKETS} valid markets, "
+        f"found {len(selected_markets)} after pagination exhausted."
+    )
 
 
 def write_csv(markets):
-    """
-    Save the fixed market universe used by the rest
-    of the analysis pipeline.
-    """
+    """Save the fixed market universe."""
+
+    if len(markets) != TARGET_MARKETS:
+        raise RuntimeError(
+            "Refusing to write market_dates.csv: "
+            f"expected {TARGET_MARKETS} markets, "
+            f"got {len(markets)}."
+        )
 
     with open(
         OUTPUT_FILE,
@@ -187,9 +201,7 @@ def write_csv(markets):
         encoding="utf-8",
     ) as file:
 
-        writer = csv.writer(
-            file
-        )
+        writer = csv.writer(file)
 
         writer.writerow(
             [
@@ -217,16 +229,8 @@ def write_csv(markets):
                         market.condition_id
                     ),
                     market.question or "",
-                    (
-                        start_date.isoformat()
-                        if start_date is not None
-                        else ""
-                    ),
-                    (
-                        end_date.isoformat()
-                        if end_date is not None
-                        else ""
-                    ),
+                    start_date.isoformat(),
+                    end_date.isoformat(),
                     get_volume(
                         market
                     ),
@@ -236,6 +240,12 @@ def write_csv(markets):
 
 def main():
     markets = collect_markets()
+
+    if len(markets) != TARGET_MARKETS:
+        raise RuntimeError(
+            "Market selection validation failed: "
+            f"expected {TARGET_MARKETS}, got {len(markets)}."
+        )
 
     print()
     print(
@@ -251,22 +261,20 @@ def main():
         len(markets),
     )
 
-    if markets:
+    volumes = [
+        get_volume(market)
+        for market in markets
+    ]
 
-        volumes = [
-            get_volume(market)
-            for market in markets
-        ]
+    print(
+        "Highest volume:",
+        max(volumes),
+    )
 
-        print(
-            "Highest volume:",
-            max(volumes),
-        )
-
-        print(
-            "Lowest volume in sample:",
-            min(volumes),
-        )
+    print(
+        "Lowest volume in sample:",
+        min(volumes),
+    )
 
     write_csv(
         markets

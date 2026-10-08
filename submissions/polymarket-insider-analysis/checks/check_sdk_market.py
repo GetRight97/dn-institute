@@ -12,7 +12,9 @@ def main():
     with PublicClient() as client:
 
         page = client.list_markets(
-            condition_ids=[CONDITION_ID],
+            condition_ids=[
+                CONDITION_ID
+            ],
             closed=True,
             page_size=10,
         ).first_page()
@@ -25,8 +27,29 @@ def main():
 
         market = page.items[0]
 
+        if str(
+            market.condition_id
+        ) != CONDITION_ID:
+            raise RuntimeError(
+                "Returned market condition_id does not "
+                "match requested condition_id."
+            )
+
+        state = getattr(
+            market,
+            "state",
+            None,
+        )
+
+        if state is None:
+            raise RuntimeError(
+                "Market has no state object."
+            )
+
         print("MARKET")
-        print("===================================")
+        print(
+            "==================================="
+        )
 
         print(
             "Condition ID:",
@@ -45,8 +68,17 @@ def main():
         print(
             "Closed:",
             getattr(
-                market,
+                state,
                 "closed",
+                None,
+            ),
+        )
+
+        print(
+            "Start date:",
+            getattr(
+                state,
+                "start_date",
                 None,
             ),
         )
@@ -54,7 +86,7 @@ def main():
         print(
             "End date:",
             getattr(
-                market,
+                state,
                 "end_date",
                 None,
             ),
@@ -63,7 +95,7 @@ def main():
         print(
             "Closed time:",
             getattr(
-                market,
+                state,
                 "closed_time",
                 None,
             ),
