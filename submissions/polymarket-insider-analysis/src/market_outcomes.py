@@ -1,6 +1,7 @@
 from pathlib import Path
 import csv
 import json
+import os
 import time
 
 from polymarket import PublicClient
@@ -18,6 +19,7 @@ PROCESSED_DIR.mkdir(
 
 MARKETS_FILE = RAW_DIR / "market_dates.csv"
 OUTPUT_FILE = PROCESSED_DIR / "market_outcomes.csv"
+TEMP_OUTPUT_FILE = PROCESSED_DIR / "market_outcomes.csv.tmp"
 
 EXPECTED_MARKETS = 20
 MAX_RETRIES = 5
@@ -27,11 +29,11 @@ def load_condition_ids():
     """
     Read and validate the fixed market universe.
 
-    Downstream analysis is defined for exactly 20 selected
-    markets, so a smaller or larger input is rejected.
+    Exactly 20 unique non-empty condition IDs are required.
     """
 
     condition_ids = []
+    seen = set()
 
     with open(
         MARKETS_FILE,
@@ -39,26 +41,43 @@ def load_condition_ids():
         encoding="utf-8",
     ) as file:
 
-        reader = csv.DictReader(file)
+        reader = csv.DictReader(
+            file
+        )
 
-        for row in reader:
+        for row_number, row in enumerate(
+            reader,
+            start=2,
+        ):
             condition_id = row.get(
                 "condition_id",
                 "",
             ).strip()
 
-            if condition_id:
-                condition_ids.append(
-                    condition_id
+            if not condition_id:
+                raise RuntimeError(
+                    "Invalid market_dates.csv: "
+                    f"row {row_number} is missing condition_id."
                 )
 
-    condition_ids = list(
-        dict.fromkeys(
-            condition_ids
-        )
-    )
+            if condition_id in seen:
+                raise RuntimeError(
+                    "Invalid market_dates.csv: "
+                    f"duplicate condition_id at row {row_number}: "
+                    f"{condition_id}"
+                )
 
-    if len(condition_ids) != EXPECTED_MARKETS:
+            seen.add(
+                condition_id
+            )
+
+            condition_ids.append(
+                condition_id
+            )
+
+    if len(
+        condition_ids
+    ) != EXPECTED_MARKETS:
         raise RuntimeError(
             "Invalid fixed market universe: "
             f"expected exactly {EXPECTED_MARKETS} unique "
@@ -94,7 +113,9 @@ def fetch_market(
                 page_size=10,
             )
 
-            page = paginator.first_page()
+            page = (
+                paginator.first_page()
+            )
 
             if not page.items:
                 raise RuntimeError(
@@ -153,11 +174,7 @@ def fetch_market(
 def collect_markets(
     condition_ids,
 ):
-    """
-    Retrieve metadata for every market in the fixed universe.
-
-    Any lookup failure aborts downstream enrichment.
-    """
+    """Retrieve every selected market or fail."""
 
     found_markets = {}
     failed_ids = []
@@ -204,11 +221,12 @@ def collect_markets(
     if failed_ids:
         raise RuntimeError(
             f"{len(failed_ids)} market lookup(s) failed. "
-            "market_outcomes.csv was not created because "
-            "downstream analysis would be incomplete."
+            "Outcome enrichment aborted."
         )
 
-    if len(found_markets) != EXPECTED_MARKETS:
+    if len(
+        found_markets
+    ) != EXPECTED_MARKETS:
         raise RuntimeError(
             "Market coverage check failed: "
             f"expected {EXPECTED_MARKETS}, "
@@ -221,12 +239,7 @@ def collect_markets(
 def determine_winner(
     market,
 ):
-    """
-    Determine the winning binary outcome.
-
-    A winner is accepted only when the market is closed and
-    final prices are exactly 1.0 / 0.0.
-    """
+    """Determine a binary winning outcome."""
 
     state = getattr(
         market,
@@ -243,17 +256,28 @@ def determine_winner(
         state.closed
     )
 
-    yes_outcome = market.outcomes.yes
-    no_outcome = market.outcomes.no
+    yes_outcome = (
+        market.outcomes.yes
+    )
 
-    yes_label = yes_outcome.label
-    no_label = no_outcome.label
+    no_outcome = (
+        market.outcomes.no
+    )
+
+    yes_label = (
+        yes_outcome.label
+    )
+
+    no_label = (
+        no_outcome.label
+    )
 
     yes_price = (
         float(
             yes_outcome.price
         )
-        if yes_outcome.price is not None
+        if yes_outcome.price
+        is not None
         else None
     )
 
@@ -261,7 +285,8 @@ def determine_winner(
         float(
             no_outcome.price
         )
-        if no_outcome.price is not None
+        if no_outcome.price
+        is not None
         else None
     )
 
@@ -275,7 +300,9 @@ def determine_winner(
 
         if status is not None:
             try:
-                uma_status = status.value
+                uma_status = (
+                    status.value
+                )
             except AttributeError:
                 uma_status = str(
                     status
@@ -292,27 +319,37 @@ def determine_winner(
             yes_price == 1.0
             and no_price == 0.0
         ):
-            winning_outcome = yes_label
+            winning_outcome = (
+                yes_label
+            )
 
         elif (
             no_price == 1.0
             and yes_price == 0.0
         ):
-            winning_outcome = no_label
+            winning_outcome = (
+                no_label
+            )
 
     return {
-        "closed": closed,
-        "yes_label": yes_label,
-        "no_label": no_label,
-        "yes_price": yes_price,
-        "no_price": no_price,
-        "uma_status": uma_status,
-        "is_resolved": bool(
-            winning_outcome
-        ),
-        "winning_outcome": (
-            winning_outcome
-        ),
+        "closed":
+            closed,
+        "yes_label":
+            yes_label,
+        "no_label":
+            no_label,
+        "yes_price":
+            yes_price,
+        "no_price":
+            no_price,
+        "uma_status":
+            uma_status,
+        "is_resolved":
+            bool(
+                winning_outcome
+            ),
+        "winning_outcome":
+            winning_outcome,
     }
 
 
@@ -320,12 +357,15 @@ def build_rows(
     found_markets,
 ):
     """
-    Build all outcome rows in memory and validate resolution
-    before any output file is written.
+    Build and validate every outcome row before writing.
+
+    Every selected market must have closed_time and an
+    identifiable winning outcome.
     """
 
     rows = []
     unresolved_ids = []
+    missing_closed_time_ids = []
 
     for (
         condition_id,
@@ -349,6 +389,11 @@ def build_rows(
             "closed_time",
             None,
         )
+
+        if closed_time is None:
+            missing_closed_time_ids.append(
+                condition_id
+            )
 
         end_date = getattr(
             state,
@@ -374,32 +419,44 @@ def build_rows(
                 "title":
                     market.question or "",
                 "closed":
-                    result["closed"],
+                    result[
+                        "closed"
+                    ],
                 "closed_time":
                     (
                         closed_time.isoformat()
-                        if closed_time is not None
+                        if closed_time
+                        is not None
                         else ""
                     ),
                 "end_date":
                     (
                         end_date.isoformat()
-                        if end_date is not None
+                        if end_date
+                        is not None
                         else ""
                     ),
                 "outcomes":
                     json.dumps(
                         [
-                            result["yes_label"],
-                            result["no_label"],
+                            result[
+                                "yes_label"
+                            ],
+                            result[
+                                "no_label"
+                            ],
                         ],
                         ensure_ascii=False,
                     ),
                 "outcome_prices":
                     json.dumps(
                         [
-                            result["yes_price"],
-                            result["no_price"],
+                            result[
+                                "yes_price"
+                            ],
+                            result[
+                                "no_price"
+                            ],
                         ],
                         ensure_ascii=False,
                     ),
@@ -414,30 +471,51 @@ def build_rows(
             }
         )
 
+    validation_errors = []
+
+    if missing_closed_time_ids:
+        validation_errors.append(
+            "missing closed_time: "
+            + ", ".join(
+                missing_closed_time_ids
+            )
+        )
+
     if unresolved_ids:
-        raise RuntimeError(
-            "Outcome enrichment incomplete: "
-            f"{len(unresolved_ids)} selected market(s) "
-            "are unresolved or have no identifiable winner: "
+        validation_errors.append(
+            "unresolved/no winner: "
             + ", ".join(
                 unresolved_ids
             )
         )
 
-    if len(rows) != EXPECTED_MARKETS:
-        raise RuntimeError(
-            "Outcome row-count validation failed: "
+    if len(
+        rows
+    ) != EXPECTED_MARKETS:
+        validation_errors.append(
+            "row count mismatch: "
             f"expected {EXPECTED_MARKETS}, "
-            f"built {len(rows)}."
+            f"built {len(rows)}"
+        )
+
+    if validation_errors:
+        raise RuntimeError(
+            "Outcome enrichment incomplete; "
+            + " | ".join(
+                validation_errors
+            )
         )
 
     return rows
 
 
-def write_market_outcomes(
+def write_market_outcomes_atomically(
     rows,
 ):
-    """Write only a fully validated outcome dataset."""
+    """
+    Write a validated dataset to a temporary file and atomically
+    replace OUTPUT_FILE only after the complete write succeeds.
+    """
 
     fieldnames = [
         "condition_id",
@@ -451,49 +529,73 @@ def write_market_outcomes(
         "uma_status",
     ]
 
-    with open(
-        OUTPUT_FILE,
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as output_file:
+    try:
+        with open(
+            TEMP_OUTPUT_FILE,
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as output_file:
 
-        writer = csv.DictWriter(
-            output_file,
-            fieldnames=fieldnames,
+            writer = csv.DictWriter(
+                output_file,
+                fieldnames=fieldnames,
+            )
+
+            writer.writeheader()
+            writer.writerows(
+                rows
+            )
+
+        os.replace(
+            TEMP_OUTPUT_FILE,
+            OUTPUT_FILE,
         )
 
-        writer.writeheader()
-        writer.writerows(
-            rows
-        )
+    except Exception:
+        try:
+            TEMP_OUTPUT_FILE.unlink(
+                missing_ok=True
+            )
+        except OSError:
+            pass
+
+        raise
 
 
 def main():
-    condition_ids = load_condition_ids()
+    condition_ids = (
+        load_condition_ids()
+    )
 
-    found_markets = collect_markets(
-        condition_ids
+    found_markets = (
+        collect_markets(
+            condition_ids
+        )
     )
 
     rows = build_rows(
         found_markets
     )
 
-    write_market_outcomes(
+    write_market_outcomes_atomically(
         rows
     )
 
     closed_time_count = sum(
         1
         for row in rows
-        if row["closed_time"]
+        if row[
+            "closed_time"
+        ]
     )
 
     resolved_count = sum(
         1
         for row in rows
-        if row["winning_outcome"]
+        if row[
+            "winning_outcome"
+        ]
     )
 
     print()

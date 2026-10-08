@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import datetime, timezone
 import csv
+import os
 import time
 
 import requests
@@ -16,6 +17,9 @@ RAW_DIR.mkdir(
 
 MARKETS_FILE = RAW_DIR / "market_dates.csv"
 OUTPUT_FILE = RAW_DIR / "trades.csv"
+TEMP_OUTPUT_FILE = RAW_DIR / "trades.csv.tmp"
+
+EXPECTED_MARKETS = 20
 
 START_DATE = datetime(
     2025,
@@ -147,10 +151,14 @@ def get_json(url, params=None):
 
 def load_markets():
     """
-    Read the fixed scoped market universe from market_dates.csv.
+    Read and validate the fixed scoped market universe.
+
+    Every row must contain a condition_id. The final universe
+    must contain exactly EXPECTED_MARKETS unique markets.
     """
 
     markets = []
+    seen_condition_ids = set()
 
     with open(
         MARKETS_FILE,
@@ -162,28 +170,49 @@ def load_markets():
             file
         )
 
-        for row in reader:
+        for row_number, row in enumerate(
+            reader,
+            start=2,
+        ):
             condition_id = row.get(
                 "condition_id",
                 "",
             ).strip()
 
             if not condition_id:
-                continue
+                raise RuntimeError(
+                    "Invalid market_dates.csv: "
+                    f"row {row_number} is missing condition_id."
+                )
+
+            if condition_id in seen_condition_ids:
+                raise RuntimeError(
+                    "Invalid market_dates.csv: "
+                    f"duplicate condition_id at row {row_number}: "
+                    f"{condition_id}"
+                )
+
+            seen_condition_ids.add(
+                condition_id
+            )
 
             markets.append(
                 {
-                    "condition_id": condition_id,
-                    "title": row.get(
-                        "title",
-                        "",
-                    ),
+                    "condition_id":
+                        condition_id,
+                    "title":
+                        row.get(
+                            "title",
+                            "",
+                        ),
                 }
             )
 
-    if not markets:
+    if len(markets) != EXPECTED_MARKETS:
         raise RuntimeError(
-            "market_dates.csv contains no markets."
+            "Invalid fixed market universe: "
+            f"expected exactly {EXPECTED_MARKETS} markets, "
+            f"found {len(markets)}."
         )
 
     print(
@@ -194,17 +223,24 @@ def load_markets():
     return markets
 
 
-def collect_trades_for_market(condition_id):
+def collect_trades_for_market(
+    condition_id,
+):
     """
-    Collect all available trade pages for one market
-    with visible progress.
+    Collect complete trade history for one selected market.
+
+    Pagination metadata is mandatory. Missing pagination or
+    missing has_more is treated as an incomplete API response
+    rather than as end-of-history.
     """
 
     all_market_trades = []
 
     params = {
-        "condition": condition_id,
-        "limit": 1000,
+        "condition":
+            condition_id,
+        "limit":
+            1000,
     }
 
     previous_cursor = None
@@ -221,27 +257,65 @@ def collect_trades_for_market(condition_id):
             dict,
         ):
             raise RuntimeError(
-                f"Unexpected trade API response "
+                "Unexpected trade API response "
                 f"for {condition_id}"
             )
 
-        trades = data.get(
-            "data"
-        )
-
-        if trades is None:
+        if "data" not in data:
             raise RuntimeError(
-                f"Missing data field "
+                "Missing data field "
                 f"for {condition_id}"
             )
+
+        trades = data[
+            "data"
+        ]
 
         if not isinstance(
             trades,
             list,
         ):
             raise RuntimeError(
-                f"Unexpected trade data format "
+                "Unexpected trade data format "
                 f"for {condition_id}"
+            )
+
+        if "pagination" not in data:
+            raise RuntimeError(
+                "Missing pagination metadata "
+                f"for {condition_id}"
+            )
+
+        pagination = data[
+            "pagination"
+        ]
+
+        if not isinstance(
+            pagination,
+            dict,
+        ):
+            raise RuntimeError(
+                "Unexpected pagination format "
+                f"for {condition_id}"
+            )
+
+        if "has_more" not in pagination:
+            raise RuntimeError(
+                "Missing pagination.has_more "
+                f"for {condition_id}"
+            )
+
+        has_more = pagination[
+            "has_more"
+        ]
+
+        if not isinstance(
+            has_more,
+            bool,
+        ):
+            raise RuntimeError(
+                "Invalid pagination.has_more "
+                f"for {condition_id}: {has_more!r}"
             )
 
         page_number += 1
@@ -258,27 +332,12 @@ def collect_trades_for_market(condition_id):
                 "   Page:",
                 page_number,
                 "| trades collected:",
-                len(all_market_trades),
+                len(
+                    all_market_trades
+                ),
             )
 
-        pagination = data.get(
-            "pagination",
-            {},
-        )
-
-        if not isinstance(
-            pagination,
-            dict,
-        ):
-            raise RuntimeError(
-                f"Unexpected pagination format "
-                f"for {condition_id}"
-            )
-
-        if not pagination.get(
-            "has_more",
-            False,
-        ):
+        if not has_more:
             break
 
         next_cursor = pagination.get(
@@ -287,26 +346,32 @@ def collect_trades_for_market(condition_id):
 
         if not next_cursor:
             raise RuntimeError(
-                f"has_more=True but "
-                f"next_cursor is missing "
+                "has_more=True but "
+                "next_cursor is missing "
                 f"for {condition_id}"
             )
 
         if next_cursor == previous_cursor:
             raise RuntimeError(
-                f"Trade API returned "
-                f"the same cursor twice "
+                "Trade API returned "
+                "the same cursor twice "
                 f"for {condition_id}"
             )
 
-        previous_cursor = next_cursor
-        params["cursor"] = next_cursor
+        previous_cursor = (
+            next_cursor
+        )
+
+        params[
+            "cursor"
+        ] = next_cursor
 
         time.sleep(
             REQUEST_DELAY
         )
 
     return all_market_trades
+
 
 def get_trade_value(
     trade,
@@ -329,8 +394,16 @@ def get_trade_value(
     return default
 
 
-def main():
-    markets = load_markets()
+def write_trades_atomically(
+    markets,
+):
+    """
+    Write to a temporary file first.
+
+    OUTPUT_FILE is replaced only after all selected markets
+    are collected successfully, so failures cannot leave a
+    partial trades.csv that looks complete.
+    """
 
     fieldnames = [
         "condition_id",
@@ -348,168 +421,240 @@ def main():
     total_api_trades = 0
     total_period_trades = 0
 
-    with open(
-        OUTPUT_FILE,
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as csv_file:
+    try:
+        with open(
+            TEMP_OUTPUT_FILE,
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as csv_file:
 
-        writer = csv.DictWriter(
-            csv_file,
-            fieldnames=fieldnames,
-        )
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=fieldnames,
+            )
 
-        writer.writeheader()
+            writer.writeheader()
 
-        for number, market in enumerate(
-            markets,
-            start=1,
-        ):
-            condition_id = (
-                market[
+            for number, market in enumerate(
+                markets,
+                start=1,
+            ):
+                condition_id = market[
                     "condition_id"
                 ]
-            )
 
-            print()
-            print(
-                number,
-                "/",
-                len(markets),
-                "| Market:",
-                condition_id,
-            )
-
-            trades = (
-                collect_trades_for_market(
-                    condition_id
-                )
-            )
-
-            total_api_trades += (
-                len(trades)
-            )
-
-            period_trade_count = 0
-
-            for trade in trades:
-                timestamp = get_trade_value(
-                    trade,
-                    "timestamp",
+                print()
+                print(
+                    number,
+                    "/",
+                    len(markets),
+                    "| Market:",
+                    condition_id,
                 )
 
-                if timestamp in (
-                    "",
-                    None,
+                trades = (
+                    collect_trades_for_market(
+                        condition_id
+                    )
+                )
+
+                total_api_trades += len(
+                    trades
+                )
+
+                period_trade_count = 0
+
+                for trade_index, trade in enumerate(
+                    trades,
+                    start=1,
                 ):
-                    continue
+                    if not isinstance(
+                        trade,
+                        dict,
+                    ):
+                        raise RuntimeError(
+                            "Invalid trade row "
+                            f"for market {condition_id}, "
+                            f"index {trade_index}: expected object."
+                        )
 
-                try:
-                    trade_date = (
-                        datetime.fromtimestamp(
-                            int(timestamp),
-                            timezone.utc,
+                    trade_condition_id = (
+                        get_trade_value(
+                            trade,
+                            "condition_id",
+                            "conditionId",
+                            "",
                         )
                     )
 
-                except (
-                    ValueError,
-                    TypeError,
-                    OSError,
-                ):
-                    continue
+                    if trade_condition_id in (
+                        "",
+                        None,
+                    ):
+                        raise RuntimeError(
+                            "Trade row is missing condition_id "
+                            f"for market {condition_id}, "
+                            f"index {trade_index}."
+                        )
 
-                if not (
-                    START_DATE
-                    <= trade_date
-                    < END_DATE
-                ):
-                    continue
-
-                trade_condition_id = (
-                    get_trade_value(
-                        trade,
-                        "condition_id",
-                        "conditionId",
-                        condition_id,
+                    trade_condition_id = str(
+                        trade_condition_id
                     )
-                )
 
-                proxy_wallet = (
-                    get_trade_value(
-                        trade,
-                        "proxy_wallet",
-                        "proxyWallet",
+                    if (
+                        trade_condition_id
+                        != condition_id
+                    ):
+                        raise RuntimeError(
+                            "Trade row condition_id mismatch: "
+                            f"requested {condition_id}, "
+                            f"received {trade_condition_id}."
+                        )
+
+                    timestamp = (
+                        get_trade_value(
+                            trade,
+                            "timestamp",
+                        )
                     )
-                )
 
-                transaction_hash = (
-                    get_trade_value(
-                        trade,
-                        "transaction_hash",
-                        "transactionHash",
-                    )
-                )
+                    if timestamp in (
+                        "",
+                        None,
+                    ):
+                        continue
 
-                writer.writerow(
-                    {
-                        "condition_id": (
-                            trade_condition_id
-                            or condition_id
-                        ),
-                        "proxy_wallet": (
-                            proxy_wallet
-                        ),
-                        "side": get_trade_value(
-                            trade,
-                            "side",
-                        ),
-                        "size": get_trade_value(
-                            trade,
-                            "size",
-                        ),
-                        "price": get_trade_value(
-                            trade,
-                            "price",
-                        ),
-                        "timestamp": timestamp,
-                        "trade_date": (
-                            trade_date.isoformat()
-                        ),
-                        "outcome": get_trade_value(
-                            trade,
-                            "outcome",
-                        ),
-                        "title": (
-                            get_trade_value(
-                                trade,
-                                "title",
+                    try:
+                        trade_date = (
+                            datetime.fromtimestamp(
+                                int(
+                                    timestamp
+                                ),
+                                timezone.utc,
                             )
-                            or market.get(
-                                "title",
-                                "",
-                            )
-                        ),
-                        "transaction_hash": (
-                            transaction_hash
-                        ),
-                    }
+                        )
+
+                    except (
+                        ValueError,
+                        TypeError,
+                        OSError,
+                    ):
+                        continue
+
+                    if not (
+                        START_DATE
+                        <= trade_date
+                        < END_DATE
+                    ):
+                        continue
+
+                    proxy_wallet = (
+                        get_trade_value(
+                            trade,
+                            "proxy_wallet",
+                            "proxyWallet",
+                        )
+                    )
+
+                    transaction_hash = (
+                        get_trade_value(
+                            trade,
+                            "transaction_hash",
+                            "transactionHash",
+                        )
+                    )
+
+                    writer.writerow(
+                        {
+                            "condition_id":
+                                trade_condition_id,
+                            "proxy_wallet":
+                                proxy_wallet,
+                            "side":
+                                get_trade_value(
+                                    trade,
+                                    "side",
+                                ),
+                            "size":
+                                get_trade_value(
+                                    trade,
+                                    "size",
+                                ),
+                            "price":
+                                get_trade_value(
+                                    trade,
+                                    "price",
+                                ),
+                            "timestamp":
+                                timestamp,
+                            "trade_date":
+                                trade_date.isoformat(),
+                            "outcome":
+                                get_trade_value(
+                                    trade,
+                                    "outcome",
+                                ),
+                            "title":
+                                (
+                                    get_trade_value(
+                                        trade,
+                                        "title",
+                                    )
+                                    or market.get(
+                                        "title",
+                                        "",
+                                    )
+                                ),
+                            "transaction_hash":
+                                transaction_hash,
+                        }
+                    )
+
+                    period_trade_count += 1
+                    total_period_trades += 1
+
+                print(
+                    "| API trades:",
+                    len(trades),
+                    "| period trades:",
+                    period_trade_count,
                 )
 
-                period_trade_count += 1
-                total_period_trades += 1
+                time.sleep(
+                    REQUEST_DELAY
+                )
 
-            print(
-                "| API trades:",
-                len(trades),
-                "| period trades:",
-                period_trade_count,
-            )
+        os.replace(
+            TEMP_OUTPUT_FILE,
+            OUTPUT_FILE,
+        )
 
-            time.sleep(
-                REQUEST_DELAY
+    except Exception:
+        try:
+            TEMP_OUTPUT_FILE.unlink(
+                missing_ok=True
             )
+        except OSError:
+            pass
+
+        raise
+
+    return (
+        total_api_trades,
+        total_period_trades,
+    )
+
+
+def main():
+    markets = load_markets()
+
+    (
+        total_api_trades,
+        total_period_trades,
+    ) = write_trades_atomically(
+        markets
+    )
 
     print()
     print(
